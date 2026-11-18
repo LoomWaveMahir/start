@@ -6,11 +6,12 @@
   var $$ = function (s, c) { return Array.prototype.slice.call((c || d).querySelectorAll(s)); };
   var reduced = w.matchMedia('(prefers-reduced-motion: reduce)').matches;
   var fine = w.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  var touch = !fine;   // phones and tablets: lighter effects, nothing that competes with scrolling
   var portrait = w.matchMedia('(max-aspect-ratio: 1/1)');
   var hasGsap = !!(w.gsap && w.ScrollTrigger);
   var hasIO = 'IntersectionObserver' in w;
   if (reduced || !hasGsap) root.classList.add('rm');
-  if (hasGsap) gsap.registerPlugin(ScrollTrigger);
+  if (hasGsap) { gsap.registerPlugin(ScrollTrigger); ScrollTrigger.config({ ignoreMobileResize: true }); }
 
   /* ---------- tracking ---------- */
   function track(name, params, standard) {
@@ -33,9 +34,7 @@
   });
   var depthSent = {};
   function depth() {
-    var max = d.documentElement.scrollHeight - w.innerHeight;
-    if (max <= 0) return;
-    var pct = (w.scrollY / max) * 100;
+    var pct = (w.scrollY / docMax) * 100;   // docMax is measured once, not on every scroll
     [25, 50, 75, 100].forEach(function (m) {
       if (!depthSent[m] && pct >= m - 0.5) { depthSent[m] = 1; track('ScrollDepth' + m, { percent: m }); }
     });
@@ -43,7 +42,7 @@
   w.addEventListener('scroll', depth, { passive: true });
 
   /* ---------- page chrome: progress line, compact header after the hero, sticky button ---------- */
-  var heroEl = $('.hero'), bar = $('.progress i'), heroH = 0, docMax = 1, heroCta = true, chromeQueued = false;
+  var heroEl = $('.hero'), bar = $('.progress i'), heroH = 0, docMax = 1, heroCta = true, chromeQueued = false, lastW = w.innerWidth, wChanged = true;
   function measure() {
     heroH = heroEl ? heroEl.offsetHeight : 0;
     docMax = Math.max(1, d.documentElement.scrollHeight - w.innerHeight);
@@ -58,7 +57,8 @@
   function queueChrome() { if (!chromeQueued) { chromeQueued = true; requestAnimationFrame(chrome); } }
   measure(); chrome();
   w.addEventListener('scroll', queueChrome, { passive: true });
-  w.addEventListener('resize', function () { measure(); queueChrome(); });
+  // registered first, so every later resize handler can tell a real resize from a phone's address bar sliding away
+  w.addEventListener('resize', function () { wChanged = w.innerWidth !== lastW; lastW = w.innerWidth; measure(); queueChrome(); });
 
   /* ---------- run non-critical setup in separate tasks so the main thread stays free ---------- */
   var tasks = [];
@@ -66,7 +66,7 @@
 
   /* ---------- smooth scroll ---------- */
   var lenis = null;
-  if (!reduced && hasGsap && w.Lenis) {
+  if (!reduced && hasGsap && w.Lenis && fine) {   // touch screens keep their own native scrolling
     lenis = new Lenis({ lerp: 0.11, wheelMultiplier: 1, smoothWheel: true });
     lenis.on('scroll', ScrollTrigger.update);
     gsap.ticker.add(function (t) { lenis.raf(t * 1000); });
@@ -150,11 +150,14 @@
     var ctx = canvas.getContext('2d', { alpha: false });
     var stages = $$('.hero__stage', sec), chapters = $$('.hero__chapters li', sec);
     var cfg = { count: 120, pad: 4, ext: 'webp', version: '', sets: { d: 'assets/frames/d/', m: 'assets/frames/m/' } };
-    var frames = [], drawn = -1, prog = 0, set = '', lastOn = 0;
-    var lowMem = navigator.deviceMemory && navigator.deviceMemory <= 3;
-    var blend = !lowMem;            // cross-fade neighbouring frames so slow scrolling looks continuous
-    var IDLE = 15;                  // the first frames are a slow ripple: they loop gently while the page rests at the top
-    var idleReady = false, idleT0 = 0, inView = true, running = false, lastTick = 0, snapT = 0;
+    var frames = [], drawn = -1, shown = -1, prog = 0, set = '', lastOn = 0, gen = 0, dir = 1, lastPos = 0;
+    var mem = navigator.deviceMemory || 8, lowMem = mem <= 3;
+    // Phones and tablets: frames are decoded off the main thread into a small window that moves with the film,
+    // so scrolling never has to wait for a picture to decode. Desktops draw straight from the image cache.
+    var useBmp = touch && !!w.createImageBitmap && !!w.fetch;
+    var blend = !lowMem;            // cross-fade neighbouring frames so slow movement looks continuous
+    var IDLE = useBmp ? 11 : 15;    // the first frames are a slow ripple: they loop gently while the page rests at the top
+    var idleReady = false, idleT0 = 0, inView = true, running = false, lastTick = 0, snapT = 0, fadeTop = null, fadeBot = null, fadeH = 0;
 
     function url(i) {
       var n = String(i + 1); while (n.length < cfg.pad) n = '0' + n;
@@ -164,34 +167,51 @@
     function pick() {
       var c = navigator.connection || {}, slow = c.saveData || /(^|-)(2g|3g)$/.test(c.effectiveType || '');
       var dpr = w.devicePixelRatio || 1;
-      // phones whose screens are under 900 real pixels wide gain nothing from the larger frames, and decode the smaller ones faster
-      if (portrait.matches) return (!slow && !lowMem && cfg.sets.mx && w.innerWidth * dpr > 900) ? 'mx' : 'm';
+      // phones with small screens or modest memory get the lighter frames: they load faster and decode in half the time
+      if (portrait.matches) return (!slow && mem > 4 && cfg.sets.mx && w.innerWidth * dpr > 900) ? 'mx' : 'm';
       return (!slow && !lowMem && cfg.sets.dx && w.innerWidth * dpr > 2100) ? 'dx' : 'd';
     }
     function size() {
-      var r = canvas.getBoundingClientRect(), dpr = Math.min(w.devicePixelRatio || 1, portrait.matches ? 2.75 : 2);
-      if (!r.width) return;
-      var cw = Math.min(Math.round(r.width * dpr), portrait.matches ? 1280 : 2560), ch = Math.round(cw * (r.height / r.width));
-      if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; drawn = -1; }
+      var bw = canvas.offsetWidth, bh = canvas.offsetHeight, dpr = Math.min(w.devicePixelRatio || 1, portrait.matches ? 3 : 2);
+      if (!bw) return;
+      // on phones the canvas is never larger than the frames themselves, so every frame is drawn 1:1
+      var cap = portrait.matches ? (set === 'mx' ? 1080 : 810) : 2560;
+      var cw = Math.min(Math.round(bw * dpr), cap), ch = Math.round(cw * (bh / bw));
+      if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; drawn = shown = -1; }
+      // phones: the top and bottom edges of the film melt into the page (drawn into the canvas, which is far cheaper than a mask)
+      fadeTop = fadeBot = null;
+      if (portrait.matches) {
+        fadeH = Math.round(ch * 0.09);
+        fadeTop = ctx.createLinearGradient(0, 0, 0, fadeH); fadeTop.addColorStop(0, 'rgba(11,11,11,1)'); fadeTop.addColorStop(1, 'rgba(11,11,11,0)');
+        fadeBot = ctx.createLinearGradient(0, ch - fadeH, 0, ch); fadeBot.addColorStop(0, 'rgba(11,11,11,0)'); fadeBot.addColorStop(1, 'rgba(11,11,11,1)');
+      }
     }
-    function ok(i) { return frames[i] && frames[i].ok; }
-    function nearest(i) { for (var k = i; k >= 0; k--) if (ok(k)) return k; return -1; }
-    function paint(img) {
-      var cw = canvas.width, ch = canvas.height;
-      var s = Math.max(cw / img.naturalWidth, ch / img.naturalHeight);
-      var dw = img.naturalWidth * s, dh = img.naturalHeight * s;
-      ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+    function src(i) { var f = frames[i]; return f && f.ok ? (useBmp ? f.bmp : f.img) : null; }
+    function nearest(a) {   // the closest frame that can be drawn right now
+      if (!useBmp) { for (var k = a; k >= 0; k--) if (src(k)) return k; return -1; }
+      for (var q = 0; q <= 14; q++) { if (src(a - q)) return a - q; if (src(a + q)) return a + q; }
+      return -1;
+    }
+    function paint(im) {
+      var cw = canvas.width, ch = canvas.height, sw = im.naturalWidth || im.width, sh = im.naturalHeight || im.height;
+      var s = Math.max(cw / sw, ch / sh), dw = sw * s, dh = sh * s;
+      ctx.drawImage(im, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
     }
     function draw(f) {
       f = Math.max(0, Math.min(cfg.count - 1, f));
-      var key = blend ? Math.round(f * 16) / 16 : Math.round(f);
-      if (key === drawn) return;
+      // cross-fade between neighbours: always on desktop; on phones only for the resting ripple, never while scrolling
+      var soft = blend && (!touch || (idleReady && scrollF() < IDLE));
+      var key = soft ? Math.round(f * 16) / 16 : Math.round(f);
       var a = Math.floor(key), t = key - a, ia = nearest(a);
       if (ia < 0) return;
-      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
-      ctx.globalAlpha = 1; paint(frames[ia].img);
-      if (t > 0.03 && ia === a && ok(a + 1)) { ctx.globalAlpha = t; paint(frames[a + 1].img); ctx.globalAlpha = 1; }
-      drawn = key;
+      var two = ia === a && t > 0.03 && !!src(a + 1), exact = ia === a && (t <= 0.03 || two);
+      if (exact && key === drawn) return;
+      if (!exact && ia === shown && drawn === -1) return;   // already showing the best frame available
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = touch ? 'low' : 'high';
+      ctx.globalAlpha = 1; paint(src(ia));
+      if (two) { ctx.globalAlpha = t; paint(src(a + 1)); ctx.globalAlpha = 1; }
+      if (fadeTop) { ctx.fillStyle = fadeTop; ctx.fillRect(0, 0, canvas.width, fadeH); ctx.fillStyle = fadeBot; ctx.fillRect(0, canvas.height - fadeH, canvas.width, fadeH); }
+      drawn = exact ? key : -1; shown = ia;
       if (!canvas.classList.contains('is-ready')) { canvas.classList.add('is-ready'); sec.classList.add('has-film'); }
     }
     function scrollF() { return Math.min(prog / 0.9, 1) * (cfg.count - 1); }
@@ -201,6 +221,28 @@
       var iF = IDLE * 0.5 * (1 - Math.cos(((now - idleT0) / 6400) * Math.PI * 2));
       return sF + iF * (1 - sF / IDLE);   // the ripple fades out as scrolling takes over, so nothing jumps
     }
+    // keep decoded frames ready a little behind and well ahead of where the film is; let go of the rest
+    function want() {
+      if (!useBmp || !inView) return;
+      var t = Math.round(scrollF()), lo = dir >= 0 ? t - 3 : t - 9, hi = dir >= 0 ? t + 9 : t + 3, g = gen;
+      if (t <= IDLE + 1) { lo = 0; hi = Math.max(hi, IDLE + 1); }
+      lo = Math.max(0, lo); hi = Math.min(cfg.count - 1, hi);
+      for (var i = lo; i <= hi; i++) (function (i) {
+        var f = frames[i];
+        if (!f || !f.blob || f.bmp || f.busy) return;
+        f.busy = true;
+        w.createImageBitmap(f.blob).then(function (b) {
+          f.busy = false;
+          if (g !== gen || !inView) { b.close(); return; }
+          f.bmp = b;
+          var nowF = frameNow(performance.now());
+          if (Math.abs(i - nowF) < 2 || drawn === -1) { draw(nowF); }
+        }, function () { f.busy = false; if (i === 0) plain(); });
+      })(i);
+      for (var j = 0; j < frames.length; j++) { var x = frames[j]; if (x && x.bmp && (j < lo - 5 || j > hi + 5)) { x.bmp.close(); x.bmp = null; } }
+    }
+    function release() { frames.forEach(function (x) { if (x && x.bmp) { x.bmp.close(); x.bmp = null; } }); }
+    function plain() { if (!useBmp) return; useBmp = false; loadAll(); }   // a browser that cannot decode this way falls back to ordinary images
 
     function tick(now) {
       if (!running) return;
@@ -210,16 +252,23 @@
       if (idleReady && scrollF() < IDLE) draw(frameNow(now));
     }
     function loop() {
-      var want = inView && !d.hidden;
-      if (want && !running) { running = true; lastTick = performance.now(); requestAnimationFrame(tick); }
-      else if (!want) running = false;
+      var want2 = inView && !d.hidden;
+      if (want2 && !running) { running = true; lastTick = performance.now(); requestAnimationFrame(tick); }
+      else if (!want2) running = false;
     }
 
     function load(i) {
       return new Promise(function (res) {
         if (frames[i]) return res();
-        var f = frames[i] = { img: new Image(), ok: false };
-        f.img.decoding = 'async';
+        var f = frames[i] = { ok: false }, g = gen;
+        if (useBmp) {
+          fetch(url(i)).then(function (r) { if (!r.ok) throw 0; return r.blob(); }).then(function (b) {
+            if (g === gen) { f.blob = b; f.ok = true; want(); }
+            res();
+          }).catch(function () { res(); });
+          return;
+        }
+        f.img = new Image(); f.img.decoding = 'async';
         f.img.onload = function () {
           var fin = function () { f.ok = true; if (i <= scrollF() + 1) { drawn = -1; draw(frameNow(performance.now())); } res(); };
           // the resting-ripple frames are decoded off the main thread first, so drawing them never stalls the page
@@ -230,20 +279,20 @@
       });
     }
     function loadAll() {
-      frames = []; drawn = -1; set = pick(); idleReady = false;
-      var mySet = set, n0 = Math.min(IDLE + 2, cfg.count);
+      release(); gen++; frames = []; drawn = shown = -1; set = pick(); idleReady = false; size();
+      var mySet = set, myGen = gen, n0 = Math.min(IDLE + 2, cfg.count);
       // first frame straight away; everything else waits until the page itself has loaded
       load(0).then(function () {
         var go = function () {
-          if (set !== mySet) return;
+          if (gen !== myGen) return;
           var batch = [];
           for (var i = 1; i < n0; i++) batch.push(load(i));
           Promise.all(batch).then(function () {
-            if (set !== mySet) return;
-            setTimeout(function () { if (set === mySet) { idleT0 = performance.now(); idleReady = true; } }, 500);
+            if (gen !== myGen) return;
+            setTimeout(function () { if (gen === myGen) { idleT0 = performance.now(); idleReady = true; } }, 500);
             var next = n0, live = 0;
             function pump() {
-              if (set !== mySet) return;
+              if (gen !== myGen) return;
               if (next >= cfg.count) { if (!live) warmImages(); return; }
               live++; load(next++).then(function () { live--; pump(); });
             }
@@ -268,29 +317,33 @@
       sec.classList.toggle('is-boxed', p > 0.71);
     }
     function start() {
-      size(); loadAll(); loop();
+      loadAll(); loop();
       ScrollTrigger.create({
-        trigger: sec, start: 'top top', end: 'bottom bottom', scrub: 0.6,
+        trigger: sec, start: 'top top', end: 'bottom bottom', scrub: touch ? 0.3 : 0.6,
         onUpdate: function (st) {
           prog = st.progress;
           var sF = scrollF();
+          if (Math.abs(sF - lastPos) > 0.01) { dir = sF > lastPos ? 1 : -1; lastPos = sF; }
+          want();
           if (!(idleReady && sF < IDLE)) {
             draw(sF);
             // once the scroll settles, land on a whole frame so the picture is perfectly clean
-            clearTimeout(snapT);
-            snapT = setTimeout(function () { var s2 = scrollF(); if (!(idleReady && s2 < IDLE)) draw(Math.round(s2)); }, 160);
+            if (!touch) { clearTimeout(snapT); snapT = setTimeout(function () { var s2 = scrollF(); if (!(idleReady && s2 < IDLE)) draw(Math.round(s2)); }, 160); }
           }
           stage(prog);
         }
       });
-      if (hasIO) new IntersectionObserver(function (es) { inView = es[0].isIntersecting; loop(); }).observe(sec);
+      if (hasIO) new IntersectionObserver(function (es) {
+        inView = es[0].isIntersecting; loop();
+        if (useBmp) { if (inView) want(); else { release(); drawn = -1; } }   // off screen, the decoded frames are let go to free memory
+      }).observe(sec);
       d.addEventListener('visibilitychange', loop);
       var rt;
       w.addEventListener('resize', function () {
+        if (touch && !wChanged) return;   // a phone's address bar sliding away is not a real resize
         clearTimeout(rt);
         rt = setTimeout(function () {
-          size();
-          if (pick() !== set) loadAll(); else draw(frameNow(performance.now()));
+          if (pick() !== set) loadAll(); else { size(); draw(frameNow(performance.now())); }
         }, 150);
       });
       // a soft pool of light follows the pointer
@@ -378,8 +431,10 @@
       cards.forEach(function (c) { cio.observe(c); });
     } else cards.forEach(function (c) { c.classList.add('in'); });
     if (hasGsap && !reduced) {
+      var lastI = 0, pin = $('.reel__pin', sec);
       var dist = function () { return Math.max(0, rail.scrollWidth - w.innerWidth); };
-      var fit = function () { sec.style.height = (w.innerHeight + dist()) + 'px'; };
+      // the pinned screen's own height is used (it does not change when a phone's address bar hides), so nothing below shifts
+      var fit = function () { sec.style.height = ((pin ? pin.offsetHeight : w.innerHeight) + dist()) + 'px'; };
       fit();
       gsap.to(rail, {
         x: function () { return -dist(); }, ease: 'none',
@@ -388,9 +443,9 @@
           onRefreshInit: fit,
           onUpdate: function (st) {
             var i = Math.min(cards.length, Math.floor(st.progress * cards.length * 0.999) + 1);
-            if (now) now.textContent = '0' + i;
+            if (now && i !== lastI) { lastI = i; now.textContent = '0' + i; }
             if (bar) bar.style.setProperty('--rp', st.progress.toFixed(3));
-            spread();
+            if (fine) spread();
           }
         }
       });
@@ -402,10 +457,10 @@
           c.style.setProperty('--px', px.toFixed(3)); c.style.setProperty('--pa', Math.min(1, Math.abs(px) * 1.25).toFixed(3));
         });
       }
-      spread();
+      if (fine) spread();
       // the row leans into the scroll and settles when it stops
       var lean = 0, leanSet = 0, lastY = w.scrollY, st0 = ScrollTrigger.getAll().filter(function (t) { return t.trigger === sec; })[0];
-      gsap.ticker.add(function () {
+      if (fine) gsap.ticker.add(function () {
         var y = w.scrollY, v = y - lastY; lastY = y;
         var target = (st0 && st0.isActive) ? Math.max(-5, Math.min(5, v * 0.16)) : 0;
         lean += (target - lean) * 0.14;
@@ -635,7 +690,7 @@
      distance from the middle. The stylesheet turns those numbers into drift, scale and reveals, so nothing sits still
      while the page moves. Layout is measured once (and again when it changes); scrolling itself reads nothing. */
   later(function scrub() {
-    if (reduced) return;
+    if (reduced || touch) return;   // on phones the page itself is the motion; extra moving layers only cost smoothness
     var els = $$('[data-s],[data-par]'), items = [], vh = w.innerHeight, lastY = -1;
     if (!els.length) return;
     var gain = portrait.matches ? 0.6 : 1;
@@ -671,7 +726,18 @@
   later(function ambient() {
     var cv = $('.dust'), cx = cv && cv.getContext && cv.getContext('2d');
     var lowMem = navigator.deviceMemory && navigator.deviceMemory <= 3;
-    if (!cx || reduced || lowMem) return;
+    if (reduced || lowMem) return;
+    if (touch) {
+      // phones: a handful of motes moved by the compositor alone, so they cost nothing while scrolling
+      var holder = d.createElement('div'); holder.className = 'motes'; holder.setAttribute('aria-hidden', 'true');
+      for (var q = 0; q < 12; q++) {
+        var mo = d.createElement('i');
+        mo.style.cssText = '--x:' + (Math.random() * 100).toFixed(1) + '%;--s:' + (1 + Math.random() * 1.6).toFixed(1) + 'px;--o:' + (0.14 + Math.random() * 0.3).toFixed(2) + ';--t:' + (16 + Math.random() * 18).toFixed(1) + 's;--d:-' + (Math.random() * 30).toFixed(1) + 's;--dx:' + ((Math.random() - 0.5) * 60).toFixed(0) + 'px';
+        holder.appendChild(mo);
+      }
+      d.body.appendChild(holder); return;
+    }
+    if (!cx) return;
     var motes = [], dw = 0, dh = 0, k = 1, last = 0, lastY = w.scrollY, running = false;
     function size() {
       k = Math.min(w.devicePixelRatio || 1, 1.5);
@@ -711,7 +777,7 @@
   /* ---------- the client names run faster while the page is being scrolled ---------- */
   later(function marqueeRush() {
     var rows = $$('.marquee__row'), trust = $('.trust');
-    if (reduced || !hasGsap || !rows.length || !rows[0].getAnimations) return;
+    if (reduced || touch || !hasGsap || !rows.length || !rows[0].getAnimations) return;
     var rate = 1, lastY = w.scrollY, set = 1;
     gsap.ticker.add(function () {
       var y = w.scrollY, v = Math.abs(y - lastY); lastY = y;
@@ -761,12 +827,15 @@
     var size = 0, k = 1, R = 0, lon0 = 56, tilt = 22, vel = 0, AUTO = reduced ? 0 : -5;
     var dragging = false, px = 0, py = 0, lastMove = 0, touched = 0, intro = reduced ? 1 : 0, introT0 = 0, shown = false;
     var running = false, visible = false, last = 0, lastY = w.scrollY, cl = 1, sl = 0, ct = 1, st = 0;
-    var small = false, labelFont = '';
+    var small = false, labelFont = '', gGlow = null, gBody = null;
     function resize() {
       var r = box.getBoundingClientRect(); if (!r.width) return;
       k = Math.min(w.devicePixelRatio || 1, 2); size = Math.round(r.width * k);
       cv.width = size; cv.height = size; R = size * 0.41; small = r.width < 430;
       labelFont = '500 ' + ((small ? 9.5 : 11) * k).toFixed(1) + 'px Inter, system-ui, sans-serif';
+      var hf = size / 2;
+      gGlow = cx.createRadialGradient(hf, hf, R * 0.96, hf, hf, R * 1.2); gGlow.addColorStop(0, 'rgba(255,189,89,.16)'); gGlow.addColorStop(1, 'rgba(255,189,89,0)');
+      gBody = cx.createRadialGradient(hf - R * 0.38, hf - R * 0.42, R * 0.05, hf, hf, R); gBody.addColorStop(0, '#2A241C'); gBody.addColorStop(0.55, '#15130F'); gBody.addColorStop(1, '#0C0B0A');
     }
     function rot(v, o) {   // turn to the current view; o receives [x, y, z] with z towards the viewer
       var x = v[0] * cl - v[2] * sl, z = v[0] * sl + v[2] * cl;
@@ -788,12 +857,8 @@
       cl = Math.cos(lon0 * D); sl = Math.sin(lon0 * D); ct = Math.cos(tilt * D); st = Math.sin(tilt * D);
       cx.clearRect(0, 0, size, size);
       // glow around the edge, then the body of the sphere
-      var g = cx.createRadialGradient(half, half, R * 0.96, half, half, R * 1.2);
-      g.addColorStop(0, 'rgba(255,189,89,.16)'); g.addColorStop(1, 'rgba(255,189,89,0)');
-      cx.globalAlpha = 1; cx.fillStyle = g; cx.beginPath(); cx.arc(half, half, R * 1.2, 0, 6.2832); cx.fill();
-      g = cx.createRadialGradient(half - R * 0.38, half - R * 0.42, R * 0.05, half, half, R);
-      g.addColorStop(0, '#2A241C'); g.addColorStop(0.55, '#15130F'); g.addColorStop(1, '#0C0B0A');
-      cx.fillStyle = g; cx.beginPath(); cx.arc(half, half, R, 0, 6.2832); cx.fill();
+      cx.globalAlpha = 1; cx.fillStyle = gGlow; cx.beginPath(); cx.arc(half, half, R * 1.2, 0, 6.2832); cx.fill();
+      cx.fillStyle = gBody; cx.beginPath(); cx.arc(half, half, R, 0, 6.2832); cx.fill();
       cx.strokeStyle = 'rgba(255,189,89,.32)'; cx.lineWidth = k; cx.stroke();
       // grid
       cx.strokeStyle = '#F2EDE4'; cx.globalAlpha = 0.07; cx.lineWidth = k * 0.8; cx.beginPath();
@@ -876,6 +941,7 @@
     function tick(now) {
       if (!running) return;
       requestAnimationFrame(tick);
+      if (touch && now - last < 31) return;   // 30 pictures a second is plenty for a slow turn, and halves the work on phones
       var dt = Math.min(0.05, (now - last) / 1000); last = now;
       var y = w.scrollY, dy = y - lastY; lastY = y;
       if (!dragging) {
@@ -931,7 +997,7 @@
         }, { threshold: [0, 0.3, 0.6] }).observe(box);
       } else { visible = shown = true; introT0 = performance.now(); loop(); }
       d.addEventListener('visibilitychange', loop);
-      var rt; w.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(function () { resize(); draw(performance.now()); }, 150); });
+      var rt; w.addEventListener('resize', function () { if (touch && !wChanged) return; clearTimeout(rt); rt = setTimeout(function () { resize(); draw(performance.now()); }, 150); });
       if (d.fonts && d.fonts.ready) d.fonts.ready.then(function () { if (!running) draw(performance.now()); });
     }
     fetch('assets/globe.json').then(function (r) { if (!r.ok) throw 0; return r.json(); }).then(function (j) {

@@ -123,7 +123,7 @@ html.lenis,html.lenis body{height:auto}
 .js [data-fade].btn{transition:opacity .9s var(--ease-out),background-color .3s ease,color .3s ease,border-color .3s ease,scale .18s var(--ease-out)}
 .js [data-fade].btn.in{transform:translate3d(var(--mx),var(--my),0)}
 .w{display:inline-block;overflow:hidden;vertical-align:top;padding:.08em .04em .16em;margin:-.08em -.04em -.16em}
-.w>span{display:inline-block;will-change:transform}
+.w>span{display:inline-block}
 .js [data-words] .w>span{transform:translate3d(0,108%,0);transition:transform 1.15s var(--ease-out);transition-delay:calc(var(--i,0)*70ms)}
 .js [data-words].in .w>span{transform:none}
 .ln{display:block}
@@ -569,6 +569,22 @@ html.lenis,html.lenis body{height:auto}
   .fab::before{content:"";position:absolute;inset:0;border-radius:inherit;border:2px solid var(--accent);opacity:0;animation:pulse 5s var(--ease-out) infinite 2s;pointer-events:none}
 }
 @keyframes pulse{0%{opacity:.7;transform:scale(1)}26%,100%{opacity:0;transform:scale(1.28,1.6)}}
+
+/* ---------- phones and tablets: the same page, with nothing running that could cost a dropped frame ---------- */
+.motes{position:fixed;inset:0;z-index:70;overflow:hidden;pointer-events:none;contain:strict}
+.motes i{position:absolute;left:var(--x);bottom:-2vh;width:var(--s);height:var(--s);border-radius:50%;background:#FFDCA8;opacity:0;animation:mote var(--t) linear var(--d) infinite}
+@keyframes mote{0%{transform:translate3d(0,0,0);opacity:0}12%{opacity:var(--o)}88%{opacity:var(--o)}100%{transform:translate3d(var(--dx),-106vh,0);opacity:0}}
+.hero.is-scrolled .hero__title em.w>span{animation-play-state:paused}
+@media (max-aspect-ratio:1/1){.hero__canvas{-webkit-mask-image:none;mask-image:none}}
+@media (hover:none),(pointer:coarse){
+  .dust{display:none}
+  .grain{animation:none!important}
+  .bg__glow{animation:none!important}
+  .btn,.card__media,.reel__count i::after{will-change:auto}
+  .film__video,.film__shade{clip-path:none!important}
+  .js .card:not(.card--cta) .card__media{scale:none;translate:none}
+  .reel__track .card{transform:none}
+}
 
 /* ---------- scroll-linked motion ----------
    main.js gives every [data-s] / [data-par] element three numbers as it travels through the screen:
