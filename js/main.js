@@ -158,7 +158,7 @@
     var blend = !lowMem;            // cross-fade neighbouring frames so slow movement looks continuous
     var IDLE = useBmp ? 11 : 15;    // the first frames are a slow ripple: they loop gently while the page rests at the top
     var idleReady = false, idleArmed = false, idleT0 = 0, inView = true, running = false, lastTick = 0, snapT = 0, fadeTop = null, fadeBot = null, fadeH = 0;
-    var store = null, live = 0, lite = false, pageUp = false, painted = false, putQ = [], keeping = false;
+    var store = null, live = 0, lite = false, pageUp = false, painted = false, putQ = [], keeping = false, storing = false;
 
     function url(i, s) {
       var n = String(i + 1); while (n.length < cfg.pad) n = '0' + n;
@@ -293,7 +293,7 @@
         return fetch(u, low ? { priority: 'low' } : undefined).then(function (r) {
           if (!r.ok) throw 0;
           return r.blob();
-        }).then(function (b) { if (store) putQ.push([u, b]); return b; });
+        }).then(function (b) { if (store) { putQ.push([u, b]); if (storing && !keeping) keep(); } return b; });
       };
       if (!store) return net();
       return store.match(u).then(function (r) { return r ? r.blob() : net(); }, net);
@@ -340,11 +340,12 @@
       while (live < room) {
         var j = nextJob();
         if (!j || (!pageUp && j.s >= 2000)) break;   // until the page itself has finished loading, only the thin spread of light copies is fetched
-        if (j.s >= 6000) warmImages();   // the film already plays everywhere: the pictures further down the page can start coming in too
+        // the film already plays everywhere: the pictures further down the page can start coming in, and saving to the phone begins
+        if (j.s >= 6000) { warmImages(); if (!storing) { storing = true; keep(); } }
         live++;
         job(j.i, j.q, g).then(function () { if (g === gen) { live--; pump(); } });
       }
-      if (!live && pageUp && !nextJob()) { warmImages(); if (!keeping) keep(); }
+      if (!live && pageUp && !nextJob()) { warmImages(); storing = true; if (!keeping) keep(); }
     }
 
     function load(i) {   // desktop: ordinary images
