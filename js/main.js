@@ -150,18 +150,19 @@
     var ctx = canvas.getContext('2d', { alpha: false });
     var stages = $$('.hero__stage', sec), chapters = $$('.hero__chapters li', sec);
     var cfg = { count: 120, pad: 4, ext: 'webp', version: '', sets: { d: 'assets/frames/d/', m: 'assets/frames/m/' } };
-    var frames = [], drawn = -1, shown = -1, prog = 0, set = '', lastOn = 0, gen = 0, dir = 1, lastPos = 0;
+    var frames = [], drawn = -1, shown = -1, shownQ = 0, prog = 0, set = '', lastOn = 0, gen = 0, dir = 1, lastPos = 0, speed = 0, settleT = 0;
     var mem = navigator.deviceMemory || 8, lowMem = mem <= 3;
     // Phones and tablets: frames are decoded off the main thread into a small window that moves with the film,
     // so scrolling never has to wait for a picture to decode. Desktops draw straight from the image cache.
     var useBmp = touch && !!w.createImageBitmap && !!w.fetch;
     var blend = !lowMem;            // cross-fade neighbouring frames so slow movement looks continuous
     var IDLE = useBmp ? 11 : 15;    // the first frames are a slow ripple: they loop gently while the page rests at the top
-    var idleReady = false, idleT0 = 0, inView = true, running = false, lastTick = 0, snapT = 0, fadeTop = null, fadeBot = null, fadeH = 0;
+    var idleReady = false, idleArmed = false, idleT0 = 0, inView = true, running = false, lastTick = 0, snapT = 0, fadeTop = null, fadeBot = null, fadeH = 0;
+    var store = null, live = 0, lite = false, pageUp = false, painted = false, putQ = [], keeping = false;
 
-    function url(i) {
+    function url(i, s) {
       var n = String(i + 1); while (n.length < cfg.pad) n = '0' + n;
-      return cfg.sets[set] + n + '.' + cfg.ext + (cfg.version ? '?v=' + cfg.version : '');
+      return cfg.sets[s || set] + n + '.' + cfg.ext + (cfg.version ? '?v=' + cfg.version : '');
     }
     // pick the sharpest frame set the device can comfortably handle
     function pick() {
@@ -186,7 +187,7 @@
         fadeBot = ctx.createLinearGradient(0, ch - fadeH, 0, ch); fadeBot.addColorStop(0, 'rgba(11,11,11,0)'); fadeBot.addColorStop(1, 'rgba(11,11,11,1)');
       }
     }
-    function src(i) { var f = frames[i]; return f && f.ok ? (useBmp ? f.bmp : f.img) : null; }
+    function src(i) { var f = frames[i]; return f ? (useBmp ? f.bmp : (f.ok ? f.img : null)) : null; }
     function nearest(a) {   // the closest frame that can be drawn right now
       if (!useBmp) { for (var k = a; k >= 0; k--) if (src(k)) return k; return -1; }
       for (var q = 0; q <= 14; q++) { if (src(a - q)) return a - q; if (src(a + q)) return a + q; }
@@ -204,16 +205,23 @@
       var key = soft ? Math.round(f * 16) / 16 : Math.round(f);
       var a = Math.floor(key), t = key - a, ia = nearest(a);
       if (ia < 0) return;
+      var qa = useBmp ? frames[ia].q : 2;   // 1 = the light copy of this frame, 2 = the sharp one
       var two = ia === a && t > 0.03 && !!src(a + 1), exact = ia === a && (t <= 0.03 || two);
-      if (exact && key === drawn) return;
-      if (!exact && ia === shown && drawn === -1) return;   // already showing the best frame available
+      // resting at the very top, the sharp opening picture is already on screen as a plain image: wait for its sharp twin
+      if (qa === 1 && scrollF() < 1 && !canvas.classList.contains('is-ready')) return;
+      if (qa === shownQ) {
+        if (exact && key === drawn) return;
+        if (!exact && ia === shown && drawn === -1) return;   // already showing the best frame available
+      }
       ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = touch ? 'low' : 'high';
       ctx.globalAlpha = 1; paint(src(ia));
       if (two) { ctx.globalAlpha = t; paint(src(a + 1)); ctx.globalAlpha = 1; }
       if (fadeTop) { ctx.fillStyle = fadeTop; ctx.fillRect(0, 0, canvas.width, fadeH); ctx.fillStyle = fadeBot; ctx.fillRect(0, canvas.height - fadeH, canvas.width, fadeH); }
-      drawn = exact ? key : -1; shown = ia;
-      if (!canvas.classList.contains('is-ready')) { canvas.classList.add('is-ready'); sec.classList.add('has-film'); }
+      drawn = exact ? key : -1; shown = ia; shownQ = qa;
+      if (painted) ready();
     }
+    // the film takes over from the plain opening picture only after that picture has been on screen
+    function ready() { if (shown >= 0 && !canvas.classList.contains('is-ready')) { canvas.classList.add('is-ready'); sec.classList.add('has-film'); } }
     function scrollF() { return Math.min(prog / 0.9, 1) * (cfg.count - 1); }
     function frameNow(now) {
       var sF = scrollF();
@@ -221,27 +229,34 @@
       var iF = IDLE * 0.5 * (1 - Math.cos(((now - idleT0) / 6400) * Math.PI * 2));
       return sF + iF * (1 - sF / IDLE);   // the ripple fades out as scrolling takes over, so nothing jumps
     }
-    // keep decoded frames ready a little behind and well ahead of where the film is; let go of the rest
+
+    /* phones: decoded pictures are kept only around where the film is. While the film is moving fast the light copies are
+       decoded (they take a few milliseconds); as it slows and stops, the pictures being looked at are swapped for the sharp ones. */
+    function decode(i, f, q, g) {
+      f.busy = q;
+      w.createImageBitmap(q === 2 ? f.hi : f.lo).then(function (b) {
+        if (f.busy === q) f.busy = 0;
+        if (g !== gen || !inView || f.q >= q) { b.close(); return; }
+        if (f.bmp) f.bmp.close();
+        f.bmp = b; f.q = q;
+        var nowF = frameNow(performance.now());
+        if (Math.abs(i - nowF) < 2 || drawn === -1 || i === shown) draw(nowF);
+      }, function () { if (f.busy === q) f.busy = 0; if (i === 0 && q === 2) plain(); });
+    }
     function want() {
       if (!useBmp || !inView) return;
-      var t = Math.round(scrollF()), lo = dir >= 0 ? t - 3 : t - 9, hi = dir >= 0 ? t + 9 : t + 3, g = gen;
-      if (t <= IDLE + 1) { lo = 0; hi = Math.max(hi, IDLE + 1); }
+      var t = Math.round(scrollF()), top = t <= IDLE + 1, lo = dir >= 0 ? t - 3 : t - 9, hi = dir >= 0 ? t + 9 : t + 3, fast = speed > 1.2, g = gen;
+      if (top) { lo = 0; hi = Math.max(hi, IDLE + 1); }
       lo = Math.max(0, lo); hi = Math.min(cfg.count - 1, hi);
-      for (var i = lo; i <= hi; i++) (function (i) {
-        var f = frames[i];
-        if (!f || !f.blob || f.bmp || f.busy) return;
-        f.busy = true;
-        w.createImageBitmap(f.blob).then(function (b) {
-          f.busy = false;
-          if (g !== gen || !inView) { b.close(); return; }
-          f.bmp = b;
-          var nowF = frameNow(performance.now());
-          if (Math.abs(i - nowF) < 2 || drawn === -1) { draw(nowF); }
-        }, function () { f.busy = false; if (i === 0) plain(); });
-      })(i);
-      for (var j = 0; j < frames.length; j++) { var x = frames[j]; if (x && x.bmp && (j < lo - 5 || j > hi + 5)) { x.bmp.close(); x.bmp = null; } }
+      for (var i = lo; i <= hi; i++) {
+        var f = frames[i]; if (!f) continue;
+        var sharp = f.hi && (top || !f.lo || (!fast && i >= t - 2 && i <= t + 5));
+        var best = sharp ? 2 : f.lo ? 1 : 0;
+        if (best && f.q < best && f.busy < best) decode(i, f, best, g);
+      }
+      for (var j = 0; j < frames.length; j++) { var x = frames[j]; if (x && x.bmp && (j < lo - 2 || j > hi + 2)) { x.bmp.close(); x.bmp = null; x.q = 0; } }
     }
-    function release() { frames.forEach(function (x) { if (x && x.bmp) { x.bmp.close(); x.bmp = null; } }); }
+    function release() { frames.forEach(function (x) { if (x && x.bmp) { x.bmp.close(); x.bmp = null; x.q = 0; } }); }
     function plain() { if (!useBmp) return; useBmp = false; loadAll(); }   // a browser that cannot decode this way falls back to ordinary images
 
     function tick(now) {
@@ -257,17 +272,85 @@
       else if (!want2) running = false;
     }
 
-    function load(i) {
+    /* ---- loading ----
+       The film is fetched thinly spread first (every 8th picture, then every 4th, and so on), so whatever part of it the
+       visitor scrolls to, a picture close to it is already there and the film moves from the first second. Phones fetch a
+       very light copy of the whole film that way (about 1 MB), then the sharp pictures, nearest to the screen first. */
+    function level(i) { return (i % 8 === 0 || i === cfg.count - 1) ? 0 : i % 4 === 0 ? 1 : i % 2 === 0 ? 2 : 3; }
+    // pictures downloaded on an earlier visit are kept on the phone itself, so coming back never waits on the network
+    function openStore() {
+      try {
+        if (!useBmp || !w.caches || !cfg.version) return;
+        var name = 'lw-hero-' + cfg.version;
+        w.caches.open(name).then(function (c) {
+          store = c;
+          return w.caches.keys().then(function (ks) { ks.forEach(function (k) { if (k.indexOf('lw-hero-') === 0 && k !== name) w.caches.delete(k); }); });
+        }).catch(function () { store = null; });
+      } catch (e) { store = null; }
+    }
+    function grab(u, low) {
+      var net = function () {
+        return fetch(u, low ? { priority: 'low' } : undefined).then(function (r) {
+          if (!r.ok) throw 0;
+          return r.blob();
+        }).then(function (b) { if (store) putQ.push([u, b]); return b; });
+      };
+      if (!store) return net();
+      return store.match(u).then(function (r) { return r ? r.blob() : net(); }, net);
+    }
+    // what was downloaded is written to the phone's own store afterwards, one picture at a time, when the phone has nothing else to do
+    function keep() {
+      if (!store || !putQ.length) { keeping = false; return; }
+      keeping = true;
+      var it = putQ.shift(), next = function () { if (w.requestIdleCallback) w.requestIdleCallback(keep, { timeout: 1500 }); else setTimeout(keep, 40); };
+      try { store.put(it[0], new Response(it[1], { headers: { 'Content-Type': 'image/webp' } })).then(next, next); } catch (e) { next(); }
+    }
+    function rippleIn() { for (var i = 0; i <= Math.min(IDLE + 1, cfg.count - 1); i++) if (!frames[i] || !frames[i].hi) return false; return true; }
+    function job(i, q, g) {
+      var f = frames[i];
+      if (q === 2) f.hs = 1; else f.ls = 1;
+      return grab(url(i, q === 2 ? set : 's'), q === 2 && i > 0).then(function (b) {
+        if (g !== gen) return;
+        if (q === 2) { f.hi = b; f.hs = 2; } else { f.lo = b; f.ls = 2; }
+        f.ok = true; want();
+        if (!idleArmed && rippleIn()) { idleArmed = true; setTimeout(function () { if (g === gen) { idleT0 = performance.now(); idleReady = true; } }, 500); }
+      }, function () { if (g === gen) { if (q === 2) f.hs = 3; else f.ls = 3; } });
+    }
+    // what to fetch next, given where the visitor is right now
+    function nextJob() {
+      var t = Math.round(scrollF()), top = t <= IDLE + 1, rest = speed < 0.2, bi = -1, bq = 0, bs = 1e9, i, f, d0, s;
+      for (i = 0; i < cfg.count; i++) {
+        f = frames[i]; d0 = Math.abs(i - t) - (i >= t ? 0.4 : 0);
+        if (lite && !f.ls && (!f.hs || f.hs === 3)) {   // light copy: thin spread first, the gaps later
+          s = [0, 1000, 4000, 5000][level(i)] + d0;
+          if (s < bs) { bs = s; bi = i; bq = 1; }
+        }
+        if (!f.hs) {                                  // sharp picture
+          if (top && i <= IDLE + 1) s = 2000 + i;                       // the resting ripple at the top of the page
+          else if (rest && Math.abs(i - t) <= 2) s = 3000 + d0;         // the picture being looked at right now
+          else s = (lite ? 6000 : level(i) * 1000 + 2500) + d0;
+          if (s < bs) { bs = s; bi = i; bq = 2; }
+        }
+      }
+      return bi < 0 ? null : { i: bi, q: bq, s: bs };
+    }
+    function pump() {
+      if (!useBmp || !painted) return;   // nothing beyond the opening picture is asked for until the page has painted
+      var g = gen, room = inView ? 5 : 2;   // once the hero is off screen the rest trickles in, leaving the line free for what is on screen
+      while (live < room) {
+        var j = nextJob();
+        if (!j || (!pageUp && j.s >= 2000)) break;   // until the page itself has finished loading, only the thin spread of light copies is fetched
+        if (j.s >= 6000) warmImages();   // the film already plays everywhere: the pictures further down the page can start coming in too
+        live++;
+        job(j.i, j.q, g).then(function () { if (g === gen) { live--; pump(); } });
+      }
+      if (!live && pageUp && !nextJob()) { warmImages(); if (!keeping) keep(); }
+    }
+
+    function load(i) {   // desktop: ordinary images
       return new Promise(function (res) {
         if (frames[i]) return res();
-        var f = frames[i] = { ok: false }, g = gen;
-        if (useBmp) {
-          fetch(url(i)).then(function (r) { if (!r.ok) throw 0; return r.blob(); }).then(function (b) {
-            if (g === gen) { f.blob = b; f.ok = true; want(); }
-            res();
-          }).catch(function () { res(); });
-          return;
-        }
+        var f = frames[i] = { ok: false };
         f.img = new Image(); f.img.decoding = 'async';
         f.img.onload = function () {
           var fin = function () { f.ok = true; if (i <= scrollF() + 1) { drawn = -1; draw(frameNow(performance.now())); } res(); };
@@ -279,8 +362,15 @@
       });
     }
     function loadAll() {
-      release(); gen++; frames = []; drawn = shown = -1; set = pick(); idleReady = false; size();
-      var mySet = set, myGen = gen, n0 = Math.min(IDLE + 2, cfg.count);
+      release(); gen++; frames = []; drawn = shown = -1; shownQ = 0; set = pick(); idleReady = idleArmed = false; live = 0; size();
+      var myGen = gen, n0 = Math.min(IDLE + 2, cfg.count);
+      if (useBmp) {
+        lite = !!cfg.sets.s && (set === 'm' || set === 'mx');   // the light copies are upright crops, so they only stand in for the upright film
+        for (var q = 0; q < cfg.count; q++) frames.push({ ok: false, lo: null, hi: null, bmp: null, q: 0, busy: 0, ls: 0, hs: 0 });
+        // the opening picture, sharp, straight away; the thin spread of light copies follows the moment the page has painted
+        job(0, 2, myGen); if (painted) pump();
+        return;
+      }
       // first frame straight away; everything else waits until the page itself has loaded
       load(0).then(function () {
         var go = function () {
@@ -290,13 +380,14 @@
           Promise.all(batch).then(function () {
             if (gen !== myGen) return;
             setTimeout(function () { if (gen === myGen) { idleT0 = performance.now(); idleReady = true; } }, 500);
-            var next = n0, live = 0;
-            function pump() {
+            var order = [], next = 0, busy = 0;
+            for (var L = 0; L < 4; L++) for (var k = n0; k < cfg.count; k++) if (level(k) === L) order.push(k);
+            function more() {
               if (gen !== myGen) return;
-              if (next >= cfg.count) { if (!live) warmImages(); return; }
-              live++; load(next++).then(function () { live--; pump(); });
+              if (next >= order.length) { if (!busy) warmImages(); return; }
+              busy++; load(order[next++]).then(function () { busy--; more(); });
             }
-            for (var k = 0; k < 4; k++) pump();
+            for (var c = 0; c < 4; c++) more();
           });
         };
         if (d.readyState === 'complete') setTimeout(go, 250); else w.addEventListener('load', function () { setTimeout(go, 250); }, { once: true });
@@ -317,25 +408,43 @@
       sec.classList.toggle('is-boxed', p > 0.71);
     }
     function start() {
-      loadAll(); loop();
+      openStore(); loadAll(); loop();
+      // gate 1: the plain opening picture has been painted -> the film may take over and the thin first pass starts
+      var pim = $('.hero__poster img', sec), first = function () {
+        if (painted) return;
+        requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(function () { if (painted) return; painted = true; ready(); pump(); }, 120); }); });
+      };
+      var viaImg = function () { if (!pim || pim.complete) first(); else { pim.addEventListener('load', first, { once: true }); pim.addEventListener('error', first, { once: true }); } };
+      // the browser says when it has first painted; where it cannot, the opening picture having loaded is the signal
+      try {
+        new PerformanceObserver(function (l, o) { if (l.getEntriesByName('first-contentful-paint').length) { o.disconnect(); first(); } }).observe({ type: 'paint', buffered: true });
+        setTimeout(viaImg, 1800);
+      } catch (e) { viaImg(); }
+      setTimeout(first, 3000);
+      // gate 2: the page itself has finished loading -> the rest of the film
+      var up = function () { setTimeout(function () { pageUp = true; pump(); }, 250); };
+      if (d.readyState === 'complete') up(); else w.addEventListener('load', up, { once: true });
       ScrollTrigger.create({
         trigger: sec, start: 'top top', end: 'bottom bottom', scrub: touch ? 0.3 : 0.6,
         onUpdate: function (st) {
           prog = st.progress;
-          var sF = scrollF();
-          if (Math.abs(sF - lastPos) > 0.01) { dir = sF > lastPos ? 1 : -1; lastPos = sF; }
+          var sF = scrollF(), dF = sF - lastPos;
+          if (Math.abs(dF) > 0.01) { dir = dF > 0 ? 1 : -1; lastPos = sF; }
+          speed = speed * 0.6 + Math.abs(dF) * 0.4;   // how fast the film is moving, in pictures per screen refresh
           want();
           if (!(idleReady && sF < IDLE)) {
             draw(sF);
             // once the scroll settles, land on a whole frame so the picture is perfectly clean
             if (!touch) { clearTimeout(snapT); snapT = setTimeout(function () { var s2 = scrollF(); if (!(idleReady && s2 < IDLE)) draw(Math.round(s2)); }, 160); }
           }
+          // phones: when the film comes to rest, the pictures around it are swapped for the sharp ones
+          if (useBmp) { clearTimeout(settleT); settleT = setTimeout(function () { speed = 0; want(); }, 140); }
           stage(prog);
         }
       });
       if (hasIO) new IntersectionObserver(function (es) {
         inView = es[0].isIntersecting; loop();
-        if (useBmp) { if (inView) want(); else { release(); drawn = -1; } }   // off screen, the decoded frames are let go to free memory
+        if (useBmp) { if (inView) { want(); pump(); } else { release(); drawn = -1; } }   // off screen, the decoded frames are let go to free memory
       }).observe(sec);
       d.addEventListener('visibilitychange', loop);
       var rt;
@@ -445,19 +554,25 @@
             var i = Math.min(cards.length, Math.floor(st.progress * cards.length * 0.999) + 1);
             if (now && i !== lastI) { lastI = i; now.textContent = '0' + i; }
             if (bar) bar.style.setProperty('--rp', st.progress.toFixed(3));
-            if (fine) spread();
-          }
+          },
+          onRefresh: function () { place(); }
         }
       });
-      // each card knows how far it is from the middle of the screen: the centre one stands forward, the rest fall back
+      // each card knows how far it is from the middle of the screen: the centre one stands forward, the rest fall back.
+      // Card positions are measured once; while scrolling only the row's own offset is read, so nothing is laid out again.
+      var mids = [], lastX = null, vw = w.innerWidth;
+      function place() { vw = w.innerWidth; mids = cards.map(function (c) { return c.offsetLeft + c.offsetWidth / 2; }); lastX = null; }
       function spread() {
-        var vw = w.innerWidth;
-        cards.forEach(function (c) {
-          var r = c.getBoundingClientRect(), px = (r.left + r.width / 2 - vw / 2) / vw;
-          c.style.setProperty('--px', px.toFixed(3)); c.style.setProperty('--pa', Math.min(1, Math.abs(px) * 1.25).toFixed(3));
-        });
+        var x = +gsap.getProperty(rail, 'x') || 0;
+        if (x === lastX) return; lastX = x;
+        for (var k = 0; k < cards.length; k++) {
+          var px = (mids[k] + x - vw / 2) / vw, cs = cards[k].style;
+          if (fine) cs.setProperty('--px', px.toFixed(3));
+          cs.setProperty('--pa', Math.min(1, Math.abs(px) * 1.25).toFixed(3));
+        }
       }
-      if (fine) spread();
+      place(); spread();
+      gsap.ticker.add(spread);
       // the row leans into the scroll and settles when it stops
       var lean = 0, leanSet = 0, lastY = w.scrollY, st0 = ScrollTrigger.getAll().filter(function (t) { return t.trigger === sec; })[0];
       if (fine) gsap.ticker.add(function () {
@@ -690,7 +805,7 @@
      distance from the middle. The stylesheet turns those numbers into drift, scale and reveals, so nothing sits still
      while the page moves. Layout is measured once (and again when it changes); scrolling itself reads nothing. */
   later(function scrub() {
-    if (reduced || touch) return;   // on phones the page itself is the motion; extra moving layers only cost smoothness
+    if (reduced) return;
     var els = $$('[data-s],[data-par]'), items = [], vh = w.innerHeight, lastY = -1;
     if (!els.length) return;
     var gain = portrait.matches ? 0.6 : 1;
@@ -698,7 +813,7 @@
     function pageTop(el) { var y = 0; while (el) { y += el.offsetTop; el = el.offsetParent; } return y; }
     function measureAll() {
       vh = w.innerHeight;
-      items = els.map(function (el) { return { el: el, top: pageTop(el), h: el.offsetHeight, live: true, inherit: el.dataset.s === 'inherit' }; });
+      items = els.map(function (el, k) { return { el: el, top: pageTop(el), h: el.offsetHeight, live: true, cls: items[k] ? items[k].cls : false, inherit: el.dataset.s === 'inherit' }; });
       lastY = -1;
     }
     function update() {
@@ -706,6 +821,8 @@
       for (var i = 0; i < items.length; i++) {
         var it = items[i], p = (y + vh - it.top) / (vh + it.h);
         var near = p > -0.2 && p < 1.2;
+        // phones: only what is on or near the screen is given its own moving layer, so memory stays low
+        if (touch && near !== it.cls) { it.cls = near; it.el.classList.toggle('is-near', near); }
         if (!near && !it.live) continue;      // far away and already parked at its end state
         it.live = near;
         p = p < 0 ? 0 : p > 1 ? 1 : p;
@@ -718,7 +835,7 @@
     root.classList.add('has-scrub');
     if (hasGsap) { gsap.ticker.add(update); ScrollTrigger.addEventListener('refresh', measureAll); }
     else w.addEventListener('scroll', function () { requestAnimationFrame(update); }, { passive: true });
-    w.addEventListener('resize', function () { measureAll(); update(); });
+    w.addEventListener('resize', function () { if (touch && !wChanged) return; measureAll(); update(); });   // a phone's address bar sliding away is not a real resize
     w.addEventListener('load', function () { measureAll(); update(); });
   });
 
@@ -777,7 +894,7 @@
   /* ---------- the client names run faster while the page is being scrolled ---------- */
   later(function marqueeRush() {
     var rows = $$('.marquee__row'), trust = $('.trust');
-    if (reduced || touch || !hasGsap || !rows.length || !rows[0].getAnimations) return;
+    if (reduced || !hasGsap || !rows.length || !rows[0].getAnimations) return;
     var rate = 1, lastY = w.scrollY, set = 1;
     gsap.ticker.add(function () {
       var y = w.scrollY, v = Math.abs(y - lastY); lastY = y;

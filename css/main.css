@@ -570,7 +570,7 @@ html.lenis,html.lenis body{height:auto}
 }
 @keyframes pulse{0%{opacity:.7;transform:scale(1)}26%,100%{opacity:0;transform:scale(1.28,1.6)}}
 
-/* ---------- phones and tablets: the same page, with nothing running that could cost a dropped frame ---------- */
+/* ---------- phones and tablets: the same motion as the laptop, kept to moves the graphics chip does on its own ---------- */
 .motes{position:fixed;inset:0;z-index:70;overflow:hidden;pointer-events:none;contain:strict}
 .motes i{position:absolute;left:var(--x);bottom:-2vh;width:var(--s);height:var(--s);border-radius:50%;background:#FFDCA8;opacity:0;animation:mote var(--t) linear var(--d) infinite}
 @keyframes mote{0%{transform:translate3d(0,0,0);opacity:0}12%{opacity:var(--o)}88%{opacity:var(--o)}100%{transform:translate3d(var(--dx),-106vh,0);opacity:0}}
@@ -580,9 +580,8 @@ html.lenis,html.lenis body{height:auto}
   .dust{display:none}
   .grain{animation:none!important}
   .bg__glow{animation:none!important}
-  .btn,.card__media,.reel__count i::after{will-change:auto}
-  .film__video,.film__shade{clip-path:none!important}
-  .js .card:not(.card--cta) .card__media{scale:none;translate:none}
+  .btn,.reel__count i::after{will-change:auto}
+  .js .card:not(.card--cta) .card__media img{translate:none}
   .reel__track .card{transform:none}
 }
 
@@ -592,7 +591,11 @@ html.lenis,html.lenis body{height:auto}
 @property --s{syntax:"<number>";inherits:false;initial-value:.5}
 @property --c{syntax:"<number>";inherits:false;initial-value:0}
 @property --a{syntax:"<number>";inherits:false;initial-value:0}
-.has-scrub [data-par]{translate:0 calc(var(--c)*var(--par,0)*-1px);will-change:translate}
+.has-scrub [data-par]{translate:0 calc(var(--c)*var(--par,0)*-1px)}
+@media (hover:hover) and (pointer:fine){.has-scrub [data-par]{will-change:translate}}
+.has-scrub [data-par].is-near{will-change:translate}
+/* phones: the sketch slider is already being wiped by the scroll; drifting it as well would repaint it twice over */
+@media (hover:none),(pointer:coarse){.has-scrub .ba[data-par]{translate:none;will-change:auto}}
 /* film: opens from a framed card to full screen as it arrives */
 .film{background:var(--bg);--k:clamp(0,calc((.5 - var(--sv,.5))*2.6),1)}
 .film__video,.film__shade{clip-path:inset(calc(var(--k)*12%) calc(var(--k)*8%) round calc(var(--k)*22px))}
