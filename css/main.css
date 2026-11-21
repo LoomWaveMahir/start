@@ -178,6 +178,9 @@ html.lenis,html.lenis body{height:auto}
 /* stage content waits for its stage */
 .js .hero__stage>*{opacity:0;transform:translate3d(0,22px,0);transition:opacity .55s var(--ease-out),transform .8s var(--ease-out)}
 .js .hero__stage.is-on>*{opacity:1;transform:none}
+/* a stage that is not showing is out of reach of the keyboard and screen readers once it has faded */
+.js .hero__stage:not(.is-on){visibility:hidden;transition:visibility 0s .85s}
+.js .hero__stage.is-on{visibility:visible;transition:visibility 0s}
 .js .hero__stage--2.is-on>*,.js .hero__stage--3.is-on>*{transition-delay:calc(var(--i,0)*.13s)}
 .js .hero__stage--1>.hero__title{transform:none}
 .js:not(.loaded) .hero__stage--1>.hero__eyebrow,.js:not(.loaded) .hero__stage--1>.hero__foot{opacity:0;transform:translate3d(0,22px,0)}
