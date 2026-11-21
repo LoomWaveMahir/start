@@ -169,6 +169,9 @@
     // behind ?film=auto at the end of the address; do not make it the default.
     var auto = touch && /[?&]film=auto\b/.test(location.search);
     var ph = 'rest', phT = 0, autoF = 0, p0 = 0, from0 = 0, wasUp = false, mixing = false, keepA = -1, have = 0, st1 = null, h1 = -1;
+    // Phones: the picture the film shows (showF) follows the place the scroll asks for, limited in how much it may change per refresh
+    var chase = false, showF = 0, cum = null, landing = null, moved = false, still = 0;
+    var CHANGE = 1.6, CATCH = 1500;   // most change allowed on one refresh at 60 a second (a hard cut in this film is 8 to 16); longest the film may trail a swipe, in ms
     var REST = 2800, PLAY = 7200, HOLD = 2600, BACK = 900;   // milliseconds: the wave under the headline, the story, the pause on the finished box, the dissolve back
     var lut = null, stat = w.__lw = { route: '', set: '', lo: 0, hi: 0, draws: 0, retimed: false };
     var store = null, live = 0, lite = false, pageUp = false, painted = false, putQ = [], keeping = false, storing = false;
@@ -245,13 +248,47 @@
       return i >= lut.length - 1 ? lut[lut.length - 1] : lut[i] + (lut[i + 1] - lut[i]) * (x - i);
     }
     // where the film is: on phones wherever its own loop has got to, on the laptop wherever the scroll puts it
-    function scrollF() {
-      if (auto) return autoF;
-      if (!lut) return Math.min(prog / 0.9, 1) * (cfg.count - 1);
-      return filmAt(prog / 0.95);
+    function aim() { return lut ? filmAt(prog / 0.95) : Math.min(prog / 0.9, 1) * (cfg.count - 1); }   // where the scroll asks the film to be
+    function scrollF() { return auto ? autoF : chase ? showF : aim(); }                                  // where the film is
+    // the film measured in picture-change instead of frames: a still stretch is short, a transformation is long
+    function toU(f) { var i = Math.floor(f), last = cum.length - 1; return i >= last ? cum[last] : cum[i] + (cum[i + 1] - cum[i]) * (f - i); }
+    function fromU(u) {
+      var lo = 0, hi = cum.length - 1;
+      if (u <= 0) return 0;
+      if (u >= cum[hi]) return hi;
+      while (hi - lo > 1) { var m = (lo + hi) >> 1; if (cum[m] <= u) lo = m; else hi = m; }
+      return lo + (u - cum[lo]) / (cum[hi] - cum[lo]);
+    }
+    /* Phones: the film follows the scroll, but the picture is never allowed to change by more than a set amount on one screen
+       refresh. The film's transformations are only a few frames long; without this limit a normal swipe lands each of them on a
+       single refresh, as a jump cut. With it a swipe plays them out as short morphs, cross-fading from frame to frame, while
+       the still stretches are passed quickly. A slow drag is under the limit anyway and the film simply stays with the finger. */
+    function follow(now, dt) {
+      var target = aim(), gap = target - showF;
+      if (Math.abs(gap) > 0.002) {
+        var uNow = toU(showF), uGap = toU(target) - uNow, au = Math.abs(uGap), k = dt / 16.7;
+        // ease towards the target; never faster than the limit, unless so much is queued that the film would trail for too long
+        var step = Math.min(au, Math.max(au * 0.14 * k, 0.03 * k), Math.max(CHANGE * k, au * dt / CATCH));
+        var f = fromU(uNow + (uGap > 0 ? step : -step));
+        if (Math.abs(target - f) < 0.002) f = target;
+        speed = speed * 0.6 + Math.abs(f - showF) * 0.4; dir = f >= showF ? 1 : -1; showF = f; stat.f = f;
+        rest = null; landing = null; moved = true; still = 0;
+        want(); words(f);
+      } else if (moved) {
+        speed *= 0.6;
+        // at rest: sharpen what is on screen and glide the last little way onto a whole picture
+        if ((still += dt) > 140) { moved = false; speed = 0; want(); if (!(idleReady && showF < IDLE)) landing = { from: showF, to: Math.round(showF), t0: now }; }
+      }
+      if (landing) { var p = Math.min(1, (now - landing.t0) / 260); rest = landing.from + (landing.to - landing.from) * (1 - (1 - p) * (1 - p)); if (p >= 1) landing = null; }
+      draw(frameNow(now));
     }
     function retime() {
-      var wp = cfg.warp, n = cfg.count;
+      var wp = cfg.warp, n = cfg.count, pc = cfg.pace;
+      if (touch && !auto && pc && pc.length === n) {
+        cum = new Float32Array(n);
+        for (var c = 1; c < n; c++) cum[c] = cum[c - 1] + Math.max(pc[c], 0.15);   // even a still frame costs a little, so nothing is skipped outright
+        chase = true; stat.limit = true;
+      }
       if (!touch || !wp || wp.length !== n) return;
       lut = new Float32Array(513);
       for (var k = 0, i = 0; k <= 512; k++) {
@@ -364,7 +401,7 @@
     function tick(now) {
       if (!running) return;
       requestAnimationFrame(tick);
-      if (auto) { if (now - lastTick >= 14) { var dt = Math.min(50, now - lastTick); lastTick = now; play(now, dt); } return; }
+      if (auto || chase) { if (now - lastTick >= 14) { var dt = Math.min(50, now - lastTick); lastTick = now; if (auto) play(now, dt); else follow(now, dt); } return; }
       if (now - lastTick < 30) return;
       lastTick = now;
       if (idleReady && scrollF() < IDLE) draw(frameNow(now));
@@ -536,9 +573,10 @@
       if (!auto) ScrollTrigger.create({
         // the film eases after the scroll (half a second on phones, a little more on the laptop): that glide, with the cross-fade,
         // is what makes it play like a film instead of stepping
-        trigger: sec, start: 'top top', end: 'bottom bottom', scrub: touch ? 0.5 : 0.6,
+        trigger: sec, start: 'top top', end: 'bottom bottom', scrub: touch ? (chase ? 0.2 : 0.5) : 0.6,
         onUpdate: function (st) {
           prog = st.progress;
+          if (chase) return;   // phones: follow() moves the film towards this point, within the change limit
           if (rest !== null) { rest = null; landId++; }
           var sF = scrollF(), dF = sF - lastPos;
           if (Math.abs(dF) > 0.01) { dir = dF > 0 ? 1 : -1; lastPos = sF; }
@@ -1261,10 +1299,10 @@
     function show() {
       var c = navigator.connection || {}, hero = heroEl ? Math.max(0, Math.min(1, w.scrollY / Math.max(1, heroEl.offsetHeight - w.innerHeight))) : 0;
       box.textContent = [
-        'LOOM WAVE PHONE CHECK (v13): scroll the first screen, then screenshot this box',
+        'LOOM WAVE PHONE CHECK (v14): scroll the first screen, then screenshot this box',
         dev() + ' · ' + app() + ' · screen ' + w.innerWidth + 'x' + w.innerHeight + ' @' + (w.devicePixelRatio || 1),
         'motion: ' + (reduced ? 'REDUCED (a phone setting: the page shows its still version)' : 'full') + ' · touch: ' + (touch ? 'yes' : 'no') + ' · data: ' + (c.effectiveType || 'not reported') + (c.saveData ? ', data saver on' : ''),
-        'film ' + (s.mode || '') + ': ' + (s.set || 'none') + ' via ' + (s.route || 'none') + ' · light ' + (s.lo || 0) + ', sharp ' + (s.hi || 0) + ' of 120 · re-timed: ' + (s.retimed ? 'yes' : 'no'),
+        'film ' + (s.mode || '') + ': ' + (s.set || 'none') + ' via ' + (s.route || 'none') + ' · light ' + (s.lo || 0) + ', sharp ' + (s.hi || 0) + ' of 120 · re-timed: ' + (s.retimed ? 'yes' : 'no') + ' · change limit: ' + (s.limit ? 'on' : 'off'),
         'screen refresh: ' + fps + ' a second · film pictures drawn in the last second: ' + filmFps,
         'while scrolling: ' + moving + ' frames, ' + slow + ' slow, worst ' + Math.round(worst) + ' ms · first screen at ' + Math.round(hero * 100) + '%',
         'errors: ' + (errs.length ? errs.slice(-2).join(' | ') : 'none')
