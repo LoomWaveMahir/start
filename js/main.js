@@ -164,6 +164,12 @@
     // there, so on that engine a frame goes blob -> img.decode() -> bitmap (about 1 ms of main-thread time).
     var viaImg = useBmp && /AppleWebKit/.test(ua) && !/Chrome\/|Chromium\/|Android/.test(ua);
     var rest = null, landId = 0;
+    // Phones: the film plays by itself, as a loop, and the first screen scrolls like any other part of the page. A film tied to
+    // the scroll needs the screen held in place while it plays, and on a phone that reads as the page being stuck. The laptop
+    // keeps the scroll-driven film; adding ?film=scroll to the address brings it back on a phone.
+    var auto = touch && !/[?&]film=scroll\b/.test(location.search);
+    var ph = 'rest', phT = 0, autoF = 0, p0 = 0, from0 = 0, wasUp = false, mixing = false, keepA = -1, have = 0, st1 = null, h1 = -1;
+    var REST = 2800, PLAY = 7200, HOLD = 2600, BACK = 900;   // milliseconds: the wave under the headline, the story, the pause on the finished box, the dissolve back
     var lut = null, stat = w.__lw = { route: '', set: '', lo: 0, hi: 0, draws: 0, retimed: false };
     var store = null, live = 0, lite = false, pageUp = false, painted = false, putQ = [], keeping = false, storing = false;
 
@@ -206,6 +212,7 @@
       ctx.drawImage(im, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
     }
     function draw(f) {
+      if (mixing) return;   // the dissolve back to the wave is painting the canvas
       f = Math.max(0, Math.min(cfg.count - 1, f));
       // cross-fade between neighbours, so slow movement is continuous instead of stepping from picture to picture;
       // on phones it is skipped only while the film is racing past, when a blend could not be seen anyway
@@ -233,10 +240,15 @@
     function ready() { if (shown >= 0 && !canvas.classList.contains('is-ready')) { canvas.classList.add('is-ready'); sec.classList.add('has-film'); } }
     // Phones: the film is re-timed so every swipe shows change. Stretches where the picture hardly moves (the resting wave, the
     // finished box) get a small share of the scroll and the transformations get most of it. The table is made by scripts/build-warp.mjs.
-    function scrollF() {
-      if (!lut) return Math.min(prog / 0.9, 1) * (cfg.count - 1);
-      var x = Math.min(prog / 0.95, 1) * (lut.length - 1), i = Math.floor(x);
+    function filmAt(P) {   // the re-timed film: a point of the story (0 to 1) -> frame
+      var x = Math.max(0, Math.min(1, P)) * (lut.length - 1), i = Math.floor(x);
       return i >= lut.length - 1 ? lut[lut.length - 1] : lut[i] + (lut[i + 1] - lut[i]) * (x - i);
+    }
+    // where the film is: on phones wherever its own loop has got to, on the laptop wherever the scroll puts it
+    function scrollF() {
+      if (auto) return autoF;
+      if (!lut) return Math.min(prog / 0.9, 1) * (cfg.count - 1);
+      return filmAt(prog / 0.95);
     }
     function retime() {
       var wp = cfg.warp, n = cfg.count;
@@ -303,14 +315,56 @@
         var best = sharp ? 2 : f.lo ? 1 : 0;
         if (best && f.q < best && f.busy < best) decode(i, f, best, g);
       }
-      for (var j = 0; j < frames.length; j++) { var x = frames[j]; if (x && x.bmp && (j < lo - 2 || j > hi + 2)) { x.bmp.close(); x.bmp = null; x.q = 0; } }
+      for (var j = 0; j < frames.length; j++) { var x = frames[j]; if (x && x.bmp && j !== keepA && !(auto && j === 0) && (j < lo - 2 || j > hi + 2)) { x.bmp.close(); x.bmp = null; x.q = 0; } }
     }
     function release() { frames.forEach(function (x) { if (x && x.bmp) { x.bmp.close(); x.bmp = null; x.q = 0; } }); }
     function plain() { if (!useBmp) return; useBmp = false; loadAll(); }   // a browser that cannot decode this way falls back to ordinary images
 
+    function words(f) {   // the words keep their place in the story: they follow the film
+      stage(f / (cfg.count - 1) * 0.9);
+      var v = Math.min(1, f / 19.5); v = Math.round(v * 50) / 50;
+      if (st1 && v !== h1) { h1 = v; st1.style.setProperty('--h1', v); }
+    }
+    /* Phones: the film's own loop.
+       rest  the wave swells gently under the headline for a few seconds; once the whole film has arrived, it breaks into the story
+       play  wave -> pattern pieces -> hoodie -> boxed, at the re-timed pace, cross-fading from picture to picture
+       hold  the finished box, with the closing words and buttons
+       back  the box dissolves into the wave and the loop begins again */
+    function play(now, dt) {
+      var last = cfg.count - 1, f;
+      if (ph === 'rest') {
+        if (!idleReady) return;
+        if (have >= cfg.count && now - idleT0 >= REST) {
+          // the story picks up from wherever the swell has got to, so nothing jumps
+          from0 = autoF = Math.min(IDLE, frameNow(now)); p0 = lut ? cfg.warp[Math.round(from0)] : from0 / last; ph = 'play'; phT = 0;
+        } else draw(frameNow(now));
+      }
+      if (ph === 'play') {
+        phT += dt; var p = Math.min(1, phT / PLAY);
+        f = lut ? filmAt(p0 + (1 - p0) * p) : from0 + (last - from0) * p;
+        speed = speed * 0.6 + Math.abs(f - autoF) * 0.4; autoF = f; dir = 1; stat.f = f;
+        want(); draw(f); words(f);
+        if (p >= 1) { ph = 'hold'; phT = 0; speed = 0; want(); }
+      } else if (ph === 'hold') {
+        phT += dt;
+        var f0 = frames[0];
+        if (f0 && !f0.bmp && !f0.busy) decode(0, f0, f0.hi ? 2 : 1, gen);
+        if (!src(last)) want();
+        if (phT >= HOLD && src(0) && src(last)) { ph = 'back'; phT = 0; mixing = true; keepA = last; autoF = 0; stat.f = 0; words(0); want(); }
+      } else if (ph === 'back') {
+        phT += dt; var q = Math.min(1, phT / BACK), a = src(last), b = src(0);
+        if (a && b) {
+          ctx.globalAlpha = 1; paint(a); ctx.globalAlpha = q * q * (3 - 2 * q); paint(b); ctx.globalAlpha = 1;
+          if (fadeTop) { ctx.fillStyle = fadeTop; ctx.fillRect(0, 0, canvas.width, fadeH); ctx.fillStyle = fadeBot; ctx.fillRect(0, canvas.height - fadeH, canvas.width, fadeH); }
+          stat.draws++;
+        }
+        if (q >= 1 || !a || !b) { mixing = false; keepA = -1; ph = 'rest'; idleT0 = now; wasUp = false; drawn = shown = -1; shownQ = 0; draw(frameNow(now)); }
+      }
+    }
     function tick(now) {
       if (!running) return;
       requestAnimationFrame(tick);
+      if (auto) { if (now - lastTick >= 14) { var dt = Math.min(50, now - lastTick); lastTick = now; play(now, dt); } return; }
       if (now - lastTick < 30) return;
       lastTick = now;
       if (idleReady && scrollF() < IDLE) draw(frameNow(now));
@@ -361,6 +415,7 @@
       return grab(url(i, q === 2 ? set : 's'), q === 2 && i > 0).then(function (b) {
         if (g !== gen) return;
         if (q === 2) { f.hi = b; f.hs = 2; stat.hi++; } else { f.lo = b; f.ls = 2; stat.lo++; }
+        if (!f.ok) have++;
         f.ok = true; want();
         if (!idleArmed && rippleIn()) { idleArmed = true; setTimeout(function () { if (g === gen) { idleT0 = performance.now(); idleReady = true; } }, 500); }
       }, function () { if (g === gen) { if (q === 2) f.hs = 3; else f.ls = 3; } });
@@ -412,7 +467,7 @@
       });
     }
     function loadAll() {
-      release(); gen++; frames = []; drawn = shown = -1; shownQ = 0; set = pick(); stat.set = set; stat.lo = stat.hi = 0; stat.route = !useBmp ? 'plain images' : viaImg ? 'img.decode' : 'bitmap'; idleReady = idleArmed = false; live = 0; size();
+      release(); gen++; frames = []; drawn = shown = -1; shownQ = 0; set = pick(); stat.set = set; stat.lo = stat.hi = 0; stat.route = !useBmp ? 'plain images' : viaImg ? 'img.decode' : 'bitmap'; idleReady = idleArmed = false; live = 0; have = 0; size();
       var myGen = gen, n0 = Math.min(IDLE + 2, cfg.count);
       if (useBmp) {
         lite = !!cfg.sets.s && (set === 'm' || set === 'mx');   // the light copies are upright crops, so they only stand in for the upright film
@@ -459,8 +514,10 @@
       sec.classList.toggle('is-boxed', p > 0.71);
     }
     function start() {
+      st1 = stages[0];
+      stat.mode = !touch ? 'follows the scroll (laptop)' : auto ? 'plays by itself' : 'follows the scroll';
+      if (touch && !auto) sec.classList.add('hero--scroll');   // the tall, held first screen is only for the scroll-driven film
       retime(); openStore(); loadAll(); loop();
-      var st1 = stages[0], h1 = -1;
       // gate 1: the plain opening picture has been painted -> the film may take over and the thin first pass starts
       var pim = $('.hero__poster img', sec), first = function () {
         if (painted) return;
@@ -476,7 +533,7 @@
       // gate 2: the page itself has finished loading -> the rest of the film
       var up = function () { setTimeout(function () { pageUp = true; pump(); }, 250); };
       if (d.readyState === 'complete') up(); else w.addEventListener('load', up, { once: true });
-      ScrollTrigger.create({
+      if (!auto) ScrollTrigger.create({
         // the film eases after the scroll (half a second on phones, a little more on the laptop): that glide, with the cross-fade,
         // is what makes it play like a film instead of stepping
         trigger: sec, start: 'top top', end: 'bottom bottom', scrub: touch ? 0.5 : 0.6,
@@ -494,13 +551,7 @@
           }
           // phones: when the film comes to rest, the pictures around it are swapped for the sharp ones
           if (useBmp) { clearTimeout(settleT); settleT = setTimeout(function () { speed = 0; want(); land(); }, 140); }
-          if (lut) {
-            // the words keep their place in the story: they follow the film, not the raw scroll
-            stage(sF / (cfg.count - 1) * 0.9);
-            // the headline lifts away with the first movement of the finger
-            var v = Math.min(1, sF / 19.5); v = Math.round(v * 50) / 50;
-            if (st1 && v !== h1) { h1 = v; st1.style.setProperty('--h1', v); }
-          } else stage(prog);
+          if (lut) words(sF); else stage(prog);
         }
       });
       if (hasIO) new IntersectionObserver(function (es) {
@@ -1210,10 +1261,10 @@
     function show() {
       var c = navigator.connection || {}, hero = heroEl ? Math.max(0, Math.min(1, w.scrollY / Math.max(1, heroEl.offsetHeight - w.innerHeight))) : 0;
       box.textContent = [
-        'LOOM WAVE PHONE CHECK: scroll the first screen, then screenshot this box',
+        'LOOM WAVE PHONE CHECK (v12): watch the first screen, then screenshot this box',
         dev() + ' · ' + app() + ' · screen ' + w.innerWidth + 'x' + w.innerHeight + ' @' + (w.devicePixelRatio || 1),
         'motion: ' + (reduced ? 'REDUCED (a phone setting: the page shows its still version)' : 'full') + ' · touch: ' + (touch ? 'yes' : 'no') + ' · data: ' + (c.effectiveType || 'not reported') + (c.saveData ? ', data saver on' : ''),
-        'film: ' + (s.set || 'none') + ' via ' + (s.route || 'none') + ' · light ' + (s.lo || 0) + ', sharp ' + (s.hi || 0) + ' of 120 · re-timed: ' + (s.retimed ? 'yes' : 'no'),
+        'film ' + (s.mode || '') + ': ' + (s.set || 'none') + ' via ' + (s.route || 'none') + ' · light ' + (s.lo || 0) + ', sharp ' + (s.hi || 0) + ' of 120 · re-timed: ' + (s.retimed ? 'yes' : 'no'),
         'screen refresh: ' + fps + ' a second · film pictures drawn in the last second: ' + filmFps,
         'while scrolling: ' + moving + ' frames, ' + slow + ' slow, worst ' + Math.round(worst) + ' ms · first screen at ' + Math.round(hero * 100) + '%',
         'errors: ' + (errs.length ? errs.slice(-2).join(' | ') : 'none')
