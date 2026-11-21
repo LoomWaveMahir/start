@@ -164,10 +164,10 @@
     // there, so on that engine a frame goes blob -> img.decode() -> bitmap (about 1 ms of main-thread time).
     var viaImg = useBmp && /AppleWebKit/.test(ua) && !/Chrome\/|Chromium\/|Android/.test(ua);
     var rest = null, landId = 0;
-    // Phones: the film plays by itself, as a loop, and the first screen scrolls like any other part of the page. A film tied to
-    // the scroll needs the screen held in place while it plays, and on a phone that reads as the page being stuck. The laptop
-    // keeps the scroll-driven film; adding ?film=scroll to the address brings it back on a phone.
-    var auto = touch && !/[?&]film=scroll\b/.test(location.search);
+    // The film follows the scroll on every device: Mahir wants the same scroll-driven film on phones as on the laptop (he rejected
+    // a self-playing loop on 2026-11-21: "it doesn't change with the scroll anymore"). The loop is kept only for comparison,
+    // behind ?film=auto at the end of the address; do not make it the default.
+    var auto = touch && /[?&]film=auto\b/.test(location.search);
     var ph = 'rest', phT = 0, autoF = 0, p0 = 0, from0 = 0, wasUp = false, mixing = false, keepA = -1, have = 0, st1 = null, h1 = -1;
     var REST = 2800, PLAY = 7200, HOLD = 2600, BACK = 900;   // milliseconds: the wave under the headline, the story, the pause on the finished box, the dissolve back
     var lut = null, stat = w.__lw = { route: '', set: '', lo: 0, hi: 0, draws: 0, retimed: false };
@@ -516,7 +516,7 @@
     function start() {
       st1 = stages[0];
       stat.mode = !touch ? 'follows the scroll (laptop)' : auto ? 'plays by itself' : 'follows the scroll';
-      if (touch && !auto) sec.classList.add('hero--scroll');   // the tall, held first screen is only for the scroll-driven film
+      if (auto) sec.classList.add('hero--auto');   // the self-playing loop (comparison only) uses one ordinary screen
       retime(); openStore(); loadAll(); loop();
       // gate 1: the plain opening picture has been painted -> the film may take over and the thin first pass starts
       var pim = $('.hero__poster img', sec), first = function () {
@@ -1261,7 +1261,7 @@
     function show() {
       var c = navigator.connection || {}, hero = heroEl ? Math.max(0, Math.min(1, w.scrollY / Math.max(1, heroEl.offsetHeight - w.innerHeight))) : 0;
       box.textContent = [
-        'LOOM WAVE PHONE CHECK (v12): watch the first screen, then screenshot this box',
+        'LOOM WAVE PHONE CHECK (v13): scroll the first screen, then screenshot this box',
         dev() + ' · ' + app() + ' · screen ' + w.innerWidth + 'x' + w.innerHeight + ' @' + (w.devicePixelRatio || 1),
         'motion: ' + (reduced ? 'REDUCED (a phone setting: the page shows its still version)' : 'full') + ' · touch: ' + (touch ? 'yes' : 'no') + ' · data: ' + (c.effectiveType || 'not reported') + (c.saveData ? ', data saver on' : ''),
         'film ' + (s.mode || '') + ': ' + (s.set || 'none') + ' via ' + (s.route || 'none') + ' · light ' + (s.lo || 0) + ', sharp ' + (s.hi || 0) + ' of 120 · re-timed: ' + (s.retimed ? 'yes' : 'no'),

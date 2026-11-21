@@ -580,10 +580,10 @@ html.lenis,html.lenis body{height:auto}
 .hero.is-scrolled .hero__title em.w>span{animation-play-state:paused}
 @media (max-aspect-ratio:1/1){.hero__canvas{-webkit-mask-image:none;mask-image:none}}
 @media (hover:none),(pointer:coarse){
-  /* phones: the first screen is one ordinary screen and scrolls like the rest of the page; the film plays by itself.
-     (.hero--scroll is the scroll-driven film, kept for comparison: add ?film=scroll to the address) */
-  .hero{height:100vh;height:100svh}
-  .hero.hero--scroll{height:320vh;height:320svh}
+  /* phones: the film follows the scroll, as on the laptop; the held opening is a little shorter on a phone.
+     (.hero--auto is the self-playing loop, kept for comparison only: add ?film=auto to the address) */
+  .hero{height:320vh;height:320svh}
+  .hero.hero--auto{height:100vh;height:100svh}
   .hero__stage--1{translate:0 calc(var(--h1,0)*-38px);opacity:calc(1 - var(--h1,0)*.8);will-change:translate,opacity}
   .dust{display:none}
   .grain{animation:none!important}
