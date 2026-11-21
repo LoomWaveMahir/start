@@ -158,6 +158,12 @@
     var blend = !lowMem;            // cross-fade neighbouring frames so slow movement looks continuous
     var IDLE = useBmp ? 11 : 15;    // the first frames are a slow ripple: they loop gently while the page rests at the top
     var idleReady = false, idleArmed = false, idleT0 = 0, inView = true, running = false, lastTick = 0, snapT = 0, fadeTop = null, fadeBot = null, fadeH = 0;
+    var ua = navigator.userAgent || '';
+    // Safari's engine (every browser on an iPhone or iPad) decodes createImageBitmap(blob) on the main thread: measured at about
+    // 7 ms a sharp frame on a fast Mac, more on a phone, which stalls the page mid-scroll. An <img> decodes off the main thread
+    // there, so on that engine a frame goes blob -> img.decode() -> bitmap (about 1 ms of main-thread time).
+    var viaImg = useBmp && /AppleWebKit/.test(ua) && !/Chrome\/|Chromium\/|Android/.test(ua);
+    var lut = null, stat = w.__lw = { route: '', set: '', lo: 0, hi: 0, draws: 0, retimed: false };
     var store = null, live = 0, lite = false, pageUp = false, painted = false, putQ = [], keeping = false, storing = false;
 
     function url(i, s) {
@@ -217,12 +223,30 @@
       ctx.globalAlpha = 1; paint(src(ia));
       if (two) { ctx.globalAlpha = t; paint(src(a + 1)); ctx.globalAlpha = 1; }
       if (fadeTop) { ctx.fillStyle = fadeTop; ctx.fillRect(0, 0, canvas.width, fadeH); ctx.fillStyle = fadeBot; ctx.fillRect(0, canvas.height - fadeH, canvas.width, fadeH); }
-      drawn = exact ? key : -1; shown = ia; shownQ = qa;
+      drawn = exact ? key : -1; shown = ia; shownQ = qa; stat.draws++;
       if (painted) ready();
     }
     // the film takes over from the plain opening picture only after that picture has been on screen
     function ready() { if (shown >= 0 && !canvas.classList.contains('is-ready')) { canvas.classList.add('is-ready'); sec.classList.add('has-film'); } }
-    function scrollF() { return Math.min(prog / 0.9, 1) * (cfg.count - 1); }
+    // Phones: the film is re-timed so every swipe shows change. Stretches where the picture hardly moves (the resting wave, the
+    // finished box) get a small share of the scroll and the transformations get most of it. The table is made by scripts/build-warp.mjs.
+    function scrollF() {
+      if (!lut) return Math.min(prog / 0.9, 1) * (cfg.count - 1);
+      var x = Math.min(prog / 0.95, 1) * (lut.length - 1), i = Math.floor(x);
+      return i >= lut.length - 1 ? lut[lut.length - 1] : lut[i] + (lut[i + 1] - lut[i]) * (x - i);
+    }
+    function retime() {
+      var wp = cfg.warp, n = cfg.count;
+      if (!touch || !wp || wp.length !== n) return;
+      lut = new Float32Array(513);
+      for (var k = 0, i = 0; k <= 512; k++) {
+        var p = k / 512;
+        while (i < n - 2 && wp[i + 1] < p) i++;
+        var span = wp[i + 1] - wp[i];
+        lut[k] = Math.min(n - 1, i + (span > 0 ? Math.max(0, Math.min(1, (p - wp[i]) / span)) : 1));
+      }
+      stat.retimed = true;
+    }
     function frameNow(now) {
       var sF = scrollF();
       if (!idleReady || sF >= IDLE) return sF;
@@ -232,9 +256,19 @@
 
     /* phones: decoded pictures are kept only around where the film is. While the film is moving fast the light copies are
        decoded (they take a few milliseconds); as it slows and stops, the pictures being looked at are swapped for the sharp ones. */
+    function toBitmap(blob) {
+      if (!viaImg) return w.createImageBitmap(blob);
+      return new Promise(function (res, rej) {
+        var im = new Image(), u = URL.createObjectURL(blob), fin = function () { URL.revokeObjectURL(u); };
+        im.src = u;
+        (im.decode ? im.decode() : new Promise(function (r, j) { im.onload = r; im.onerror = j; }))
+          .then(function () { return w.createImageBitmap(im); })
+          .then(function (b) { fin(); res(b); }, function (e) { fin(); rej(e); });
+      });
+    }
     function decode(i, f, q, g) {
       f.busy = q;
-      w.createImageBitmap(q === 2 ? f.hi : f.lo).then(function (b) {
+      toBitmap(q === 2 ? f.hi : f.lo).then(function (b) {
         if (f.busy === q) f.busy = 0;
         if (g !== gen || !inView || f.q >= q) { b.close(); return; }
         if (f.bmp) f.bmp.close();
@@ -311,7 +345,7 @@
       if (q === 2) f.hs = 1; else f.ls = 1;
       return grab(url(i, q === 2 ? set : 's'), q === 2 && i > 0).then(function (b) {
         if (g !== gen) return;
-        if (q === 2) { f.hi = b; f.hs = 2; } else { f.lo = b; f.ls = 2; }
+        if (q === 2) { f.hi = b; f.hs = 2; stat.hi++; } else { f.lo = b; f.ls = 2; stat.lo++; }
         f.ok = true; want();
         if (!idleArmed && rippleIn()) { idleArmed = true; setTimeout(function () { if (g === gen) { idleT0 = performance.now(); idleReady = true; } }, 500); }
       }, function () { if (g === gen) { if (q === 2) f.hs = 3; else f.ls = 3; } });
@@ -363,7 +397,7 @@
       });
     }
     function loadAll() {
-      release(); gen++; frames = []; drawn = shown = -1; shownQ = 0; set = pick(); idleReady = idleArmed = false; live = 0; size();
+      release(); gen++; frames = []; drawn = shown = -1; shownQ = 0; set = pick(); stat.set = set; stat.lo = stat.hi = 0; stat.route = !useBmp ? 'plain images' : viaImg ? 'img.decode' : 'bitmap'; idleReady = idleArmed = false; live = 0; size();
       var myGen = gen, n0 = Math.min(IDLE + 2, cfg.count);
       if (useBmp) {
         lite = !!cfg.sets.s && (set === 'm' || set === 'mx');   // the light copies are upright crops, so they only stand in for the upright film
@@ -395,7 +429,8 @@
       });
     }
     function stage(p) {
-      var on = p < 0.15 ? 0 : (p > 0.36 && p < 0.66) ? 1 : p > 0.8 ? 2 : -1;
+      // on the re-timed phone film the closing words arrive with the box itself (frame 97 of 120) and stay until the hero ends
+      var on = p < 0.15 ? 0 : (p > 0.36 && p < 0.66) ? 1 : p > (lut ? 0.73 : 0.8) ? 2 : -1;
       if (on !== lastOn) {
         lastOn = on;
         stages.forEach(function (s, i) { s.classList.toggle('is-on', i === on); });
@@ -409,29 +444,30 @@
       sec.classList.toggle('is-boxed', p > 0.71);
     }
     function start() {
-      openStore(); loadAll(); loop();
+      retime(); openStore(); loadAll(); loop();
+      var st1 = stages[0], h1 = -1;
       // gate 1: the plain opening picture has been painted -> the film may take over and the thin first pass starts
       var pim = $('.hero__poster img', sec), first = function () {
         if (painted) return;
         requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(function () { if (painted) return; painted = true; ready(); pump(); }, 120); }); });
       };
-      var viaImg = function () { if (!pim || pim.complete) first(); else { pim.addEventListener('load', first, { once: true }); pim.addEventListener('error', first, { once: true }); } };
+      var byPoster = function () { if (!pim || pim.complete) first(); else { pim.addEventListener('load', first, { once: true }); pim.addEventListener('error', first, { once: true }); } };
       // the browser says when it has first painted; where it cannot, the opening picture having loaded is the signal
       try {
         new PerformanceObserver(function (l, o) { if (l.getEntriesByName('first-contentful-paint').length) { o.disconnect(); first(); } }).observe({ type: 'paint', buffered: true });
-        setTimeout(viaImg, 1800);
-      } catch (e) { viaImg(); }
+        setTimeout(byPoster, 1800);
+      } catch (e) { byPoster(); }
       setTimeout(first, 3000);
       // gate 2: the page itself has finished loading -> the rest of the film
       var up = function () { setTimeout(function () { pageUp = true; pump(); }, 250); };
       if (d.readyState === 'complete') up(); else w.addEventListener('load', up, { once: true });
       ScrollTrigger.create({
-        trigger: sec, start: 'top top', end: 'bottom bottom', scrub: touch ? 0.3 : 0.6,
+        trigger: sec, start: 'top top', end: 'bottom bottom', scrub: touch ? 0.15 : 0.6,   // a finger is already smooth: the film stays close to it
         onUpdate: function (st) {
           prog = st.progress;
           var sF = scrollF(), dF = sF - lastPos;
           if (Math.abs(dF) > 0.01) { dir = dF > 0 ? 1 : -1; lastPos = sF; }
-          speed = speed * 0.6 + Math.abs(dF) * 0.4;   // how fast the film is moving, in pictures per screen refresh
+          speed = speed * 0.6 + Math.abs(dF) * 0.4; stat.f = sF;   // how fast the film is moving, in pictures per screen refresh
           want();
           if (!(idleReady && sF < IDLE)) {
             draw(sF);
@@ -440,7 +476,13 @@
           }
           // phones: when the film comes to rest, the pictures around it are swapped for the sharp ones
           if (useBmp) { clearTimeout(settleT); settleT = setTimeout(function () { speed = 0; want(); }, 140); }
-          stage(prog);
+          if (lut) {
+            // the words keep their place in the story: they follow the film, not the raw scroll
+            stage(sF / (cfg.count - 1) * 0.9);
+            // the headline lifts away with the first movement of the finger
+            var v = Math.min(1, sF / 19.5); v = Math.round(v * 50) / 50;
+            if (st1 && v !== h1) { h1 = v; st1.style.setProperty('--h1', v); }
+          } else stage(prog);
         }
       });
       if (hasIO) new IntersectionObserver(function (es) {
@@ -697,7 +739,7 @@
         requestAnimationFrame(function () { requestAnimationFrame(function () { qa.classList.add('is-open'); }); });
         track('FaqOpen', { question: sum.textContent.trim() });
       }
-      if (hasGsap) setTimeout(function () { ScrollTrigger.refresh(); }, 650);
+      if (hasGsap) setTimeout(function () { ScrollTrigger.refresh(touch); }, 650);
     });
   });
   });
@@ -740,7 +782,7 @@
         .then(function () {
           f.hidden = true; done.hidden = false;
           track('QuoteFormSubmit', { product: data['Product type'], country: data.country }, 'Lead');
-          if (hasGsap) ScrollTrigger.refresh();
+          if (hasGsap) ScrollTrigger.refresh(touch);
         })
         .catch(function () {
           err.hidden = false; btn.disabled = false; $('span', btn).textContent = 'Send my request';
@@ -920,6 +962,7 @@
       { name: 'Netherlands', lon: 5.6, lat: 52.4, side: 1, dy: 2 },
       { name: 'UK', lon: -1.8, lat: 53.2, side: -1, dy: -5 },
       { name: 'France', lon: 2.4, lat: 46.4, side: -1, dy: 4 },
+      { name: 'Italy', lon: 12.6, lat: 42.6, side: -1, dy: 6 },
       { name: 'Greece', lon: 22.9, lat: 39.1, side: 1 },
       { name: 'Canada', lon: -106, lat: 53, side: -1 },
       { name: 'USA', lon: -98, lat: 38.5, side: -1 },
@@ -1125,14 +1168,57 @@
     }).catch(function () { fig.classList.add('map--flat'); });
   });
 
+  /* ---------- phone check ----------
+     Open the page with #check at the end of the address to see what this device is actually doing on the first screen.
+     It only reads; nothing on the page behaves differently. A screenshot of the box shows how a real phone is running it. */
+  later(function check() {
+    if (!/check/i.test(location.hash + location.search)) return;
+    var box = d.createElement('pre'), s = w.__lw || {}, errs = [], last = 0, worst = 0, slow = 0, moving = 0, lastDraws = 0, filmFps = 0, fps = 0, t0 = performance.now(), frames = 0, lastY = w.scrollY;
+    box.style.cssText = 'position:fixed;left:8px;right:8px;bottom:8px;z-index:9999;margin:0;padding:10px 12px;background:rgba(11,11,11,.93);border:1px solid #FFBD59;border-radius:6px;color:#F2EDE4;font:11px/1.45 ui-monospace,Menlo,monospace;white-space:pre-wrap;pointer-events:none';
+    d.body.appendChild(box);
+    w.addEventListener('error', function (e) { errs.push(String(e.message).slice(0, 70)); });
+    w.addEventListener('unhandledrejection', function (e) { errs.push(String(e.reason).slice(0, 70)); });
+    function dev() {
+      var u = navigator.userAgent, m;
+      if ((m = u.match(/iPhone OS (\d+)[_.](\d+)/))) return 'iPhone, iOS ' + m[1] + '.' + m[2];
+      if ((m = u.match(/Android (\d+(\.\d+)?)/))) return 'Android ' + m[1];
+      if (/iPad|Macintosh/.test(u) && navigator.maxTouchPoints > 1) return 'iPad';
+      return 'computer';
+    }
+    function app() {
+      var u = navigator.userAgent;
+      return /Instagram/.test(u) ? 'Instagram' : /FBAN|FBAV/.test(u) ? 'Facebook' : /WhatsApp/.test(u) ? 'WhatsApp' : /CriOS/.test(u) ? 'Chrome' : /FxiOS|Firefox/.test(u) ? 'Firefox' : /EdgiOS|Edg\//.test(u) ? 'Edge' : /SamsungBrowser/.test(u) ? 'Samsung Internet' : /Chrome\//.test(u) ? 'Chrome' : /Safari/.test(u) ? 'Safari' : 'in-app browser';
+    }
+    function show() {
+      var c = navigator.connection || {}, hero = heroEl ? Math.max(0, Math.min(1, w.scrollY / Math.max(1, heroEl.offsetHeight - w.innerHeight))) : 0;
+      box.textContent = [
+        'LOOM WAVE PHONE CHECK: scroll the first screen, then screenshot this box',
+        dev() + ' · ' + app() + ' · screen ' + w.innerWidth + 'x' + w.innerHeight + ' @' + (w.devicePixelRatio || 1),
+        'motion: ' + (reduced ? 'REDUCED (a phone setting: the page shows its still version)' : 'full') + ' · touch: ' + (touch ? 'yes' : 'no') + ' · data: ' + (c.effectiveType || 'not reported') + (c.saveData ? ', data saver on' : ''),
+        'film: ' + (s.set || 'none') + ' via ' + (s.route || 'none') + ' · light ' + (s.lo || 0) + ', sharp ' + (s.hi || 0) + ' of 120 · re-timed: ' + (s.retimed ? 'yes' : 'no'),
+        'screen refresh: ' + fps + ' a second · film pictures drawn in the last second: ' + filmFps,
+        'while scrolling: ' + moving + ' frames, ' + slow + ' slow, worst ' + Math.round(worst) + ' ms · first screen at ' + Math.round(hero * 100) + '%',
+        'errors: ' + (errs.length ? errs.slice(-2).join(' | ') : 'none')
+      ].join('\n');
+    }
+    function tick(now) {
+      requestAnimationFrame(tick);
+      if (last) { var g = now - last, y = w.scrollY; if (y !== lastY) { moving++; if (g > 50) slow++; if (g > worst) worst = g; lastY = y; } frames++; }
+      last = now;
+      if (now - t0 >= 1000) { fps = Math.round(frames * 1000 / (now - t0)); filmFps = (s.draws || 0) - lastDraws; lastDraws = s.draws || 0; frames = 0; t0 = now; show(); }
+    }
+    show(); requestAnimationFrame(tick);
+  });
+
   requestAnimationFrame(function () { requestAnimationFrame(function () { root.classList.add('loaded'); }); });
   var settled = false;
-  function settle() { settled = true; if (hasGsap) ScrollTrigger.refresh(); measure(); chrome(); depth(); }
+  // on phones every refresh is the safe kind: it waits for a swipe to finish instead of stopping it
+  function settle() { settled = true; if (hasGsap) ScrollTrigger.refresh(touch); measure(); chrome(); depth(); }
   (function run() {
     var fn = tasks.shift();
     if (!fn) { if (d.readyState === 'complete') settle(); else w.addEventListener('load', settle, { once: true }); return; }
     try { fn(); } catch (e) { if (w.console) console.error(e); }
     setTimeout(run, 0);
   })();
-  if (d.fonts && d.fonts.ready) d.fonts.ready.then(function () { if (settled && hasGsap) { ScrollTrigger.refresh(); measure(); } });
+  if (d.fonts && d.fonts.ready) d.fonts.ready.then(function () { if (settled && hasGsap) { ScrollTrigger.refresh(touch); measure(); } });
 })();

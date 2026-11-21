@@ -577,6 +577,9 @@ html.lenis,html.lenis body{height:auto}
 .hero.is-scrolled .hero__title em.w>span{animation-play-state:paused}
 @media (max-aspect-ratio:1/1){.hero__canvas{-webkit-mask-image:none;mask-image:none}}
 @media (hover:none),(pointer:coarse){
+  /* the pinned opening is shorter on a phone, and its headline lifts away with the first movement of the finger */
+  .hero{height:320vh;height:320svh}
+  .hero__stage--1{translate:0 calc(var(--h1,0)*-38px);opacity:calc(1 - var(--h1,0)*.8);will-change:translate,opacity}
   .dust{display:none}
   .grain{animation:none!important}
   .bg__glow{animation:none!important}
