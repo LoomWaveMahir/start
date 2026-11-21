@@ -163,6 +163,7 @@
     // 7 ms a sharp frame on a fast Mac, more on a phone, which stalls the page mid-scroll. An <img> decodes off the main thread
     // there, so on that engine a frame goes blob -> img.decode() -> bitmap (about 1 ms of main-thread time).
     var viaImg = useBmp && /AppleWebKit/.test(ua) && !/Chrome\/|Chromium\/|Android/.test(ua);
+    var rest = null, landId = 0;
     var lut = null, stat = w.__lw = { route: '', set: '', lo: 0, hi: 0, draws: 0, retimed: false };
     var store = null, live = 0, lite = false, pageUp = false, painted = false, putQ = [], keeping = false, storing = false;
 
@@ -206,15 +207,17 @@
     }
     function draw(f) {
       f = Math.max(0, Math.min(cfg.count - 1, f));
-      // cross-fade between neighbours: always on desktop; on phones only for the resting ripple, never while scrolling
-      var soft = blend && (!touch || (idleReady && scrollF() < IDLE));
+      // cross-fade between neighbours, so slow movement is continuous instead of stepping from picture to picture;
+      // on phones it is skipped only while the film is racing past, when a blend could not be seen anyway
+      var soft = blend && (!touch || speed < 3 || (idleReady && scrollF() < IDLE));
       var key = soft ? Math.round(f * 16) / 16 : Math.round(f);
       var a = Math.floor(key), t = key - a, ia = nearest(a);
       if (ia < 0) return;
-      var qa = useBmp ? frames[ia].q : 2;   // 1 = the light copy of this frame, 2 = the sharp one
+      var q0 = useBmp ? frames[ia].q : 2;   // 1 = the light copy of this frame, 2 = the sharp one
       var two = ia === a && t > 0.03 && !!src(a + 1), exact = ia === a && (t <= 0.03 || two);
       // resting at the very top, the sharp opening picture is already on screen as a plain image: wait for its sharp twin
-      if (qa === 1 && scrollF() < 1 && !canvas.classList.contains('is-ready')) return;
+      if (q0 === 1 && scrollF() < 1 && !canvas.classList.contains('is-ready')) return;
+      var qa = q0 * 4 + (two && useBmp ? frames[a + 1].q : 0);   // redrawn when either picture of the pair sharpens
       if (qa === shownQ) {
         if (exact && key === drawn) return;
         if (!exact && ia === shown && drawn === -1) return;   // already showing the best frame available
@@ -249,13 +252,25 @@
     }
     function frameNow(now) {
       var sF = scrollF();
-      if (!idleReady || sF >= IDLE) return sF;
+      if (!idleReady || sF >= IDLE) return rest !== null ? rest : sF;
       var iF = IDLE * 0.5 * (1 - Math.cos(((now - idleT0) / 6400) * Math.PI * 2));
       return sF + iF * (1 - sF / IDLE);   // the ripple fades out as scrolling takes over, so nothing jumps
     }
 
     /* phones: decoded pictures are kept only around where the film is. While the film is moving fast the light copies are
        decoded (they take a few milliseconds); as it slows and stops, the pictures being looked at are swapped for the sharp ones. */
+    // Phones: once the scroll has stopped, the film glides the last little way onto a whole picture, so it never rests
+    // half-way between two (a blend of two different pictures looks like a double exposure when it stands still).
+    function land() {
+      var from = scrollF(), to = Math.round(from), id = ++landId, t0 = performance.now();
+      if (idleReady && from < IDLE) return;   // the resting ripple owns the top of the film
+      (function step(now) {
+        if (id !== landId) return;
+        var p = Math.min(1, (now - t0) / 260), e = 1 - (1 - p) * (1 - p);
+        rest = from + (to - from) * e; draw(rest);
+        if (p < 1) requestAnimationFrame(step);
+      })(t0);
+    }
     function toBitmap(blob) {
       if (!viaImg) return w.createImageBitmap(blob);
       return new Promise(function (res, rej) {
@@ -462,9 +477,12 @@
       var up = function () { setTimeout(function () { pageUp = true; pump(); }, 250); };
       if (d.readyState === 'complete') up(); else w.addEventListener('load', up, { once: true });
       ScrollTrigger.create({
-        trigger: sec, start: 'top top', end: 'bottom bottom', scrub: touch ? 0.15 : 0.6,   // a finger is already smooth: the film stays close to it
+        // the film eases after the scroll (half a second on phones, a little more on the laptop): that glide, with the cross-fade,
+        // is what makes it play like a film instead of stepping
+        trigger: sec, start: 'top top', end: 'bottom bottom', scrub: touch ? 0.5 : 0.6,
         onUpdate: function (st) {
           prog = st.progress;
+          if (rest !== null) { rest = null; landId++; }
           var sF = scrollF(), dF = sF - lastPos;
           if (Math.abs(dF) > 0.01) { dir = dF > 0 ? 1 : -1; lastPos = sF; }
           speed = speed * 0.6 + Math.abs(dF) * 0.4; stat.f = sF;   // how fast the film is moving, in pictures per screen refresh
@@ -475,7 +493,7 @@
             if (!touch) { clearTimeout(snapT); snapT = setTimeout(function () { var s2 = scrollF(); if (!(idleReady && s2 < IDLE)) draw(Math.round(s2)); }, 160); }
           }
           // phones: when the film comes to rest, the pictures around it are swapped for the sharp ones
-          if (useBmp) { clearTimeout(settleT); settleT = setTimeout(function () { speed = 0; want(); }, 140); }
+          if (useBmp) { clearTimeout(settleT); settleT = setTimeout(function () { speed = 0; want(); land(); }, 140); }
           if (lut) {
             // the words keep their place in the story: they follow the film, not the raw scroll
             stage(sF / (cfg.count - 1) * 0.9);
